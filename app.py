@@ -10,33 +10,45 @@ import pandas as pd
 import requests
 import streamlit as st
 
+
 # -----------------------------
-# Config (env only)
+# Config (env first, then st.secrets)
 # -----------------------------
-API_URL_TEMPLATE = os.getenv(
+def _get_config(name: str, default: str = "") -> str:
+    v = os.getenv(name)
+    if v:
+        return v
+    try:
+        sv = st.secrets.get(name)
+        if sv is None:
+            return default
+        return str(sv)
+    except Exception:
+        return default
+
+
+API_URL_TEMPLATE = _get_config(
     "KPI_API_URL_TEMPLATE",
     "https://isp.beans.ai/enterprise/v1/lists/status_logs"
     "?tracking_id={tracking_id}&readable=true"
     "&include_pod=true&include_item=true",
 )
-API_TOKEN = os.getenv("KPI_API_TOKEN", "")
-API_TIMEOUT_SECONDS = int(os.getenv("KPI_API_TIMEOUT_SECONDS", "20"))
+API_TOKEN = _get_config("KPI_API_TOKEN", "")
+API_TIMEOUT_SECONDS = int(_get_config("KPI_API_TIMEOUT_SECONDS", "20"))
 
-# Reference endpoints for filtering (routes/warehouses/DSP lists)
-ROUTES_URL = os.getenv(
+ROUTES_URL = _get_config(
     "KPI_ROUTES_URL",
     "https://isp.beans.ai/enterprise/v1/lists/routes?updatedAfter=0&includeToday=true",
 )
-WAREHOUSES_URL = os.getenv(
+WAREHOUSES_URL = _get_config(
     "KPI_WAREHOUSES_URL",
     "https://isp.beans.ai/enterprise/v1/lists/warehouses?updatedAfter=0",
 )
-DSPS_URL = os.getenv(
+DSPS_URL = _get_config(
     "KPI_DSPS_URL",
     "https://isp.beans.ai/enterprise/v1/lists/thirdparty_companies",
 )
 
-# Output (keep your original columns + add filter-related columns)
 OUTPUT_COLUMNS = [
     "trakcing_id",
     "shipperName",
@@ -53,7 +65,7 @@ OUTPUT_COLUMNS = [
     "尝试配送时间",
     "送达时间",
     "整体配送时间",
-    # added (for filtering & visibility)
+    # for filtering / visibility
     "route_no",
     "dateStr",
     "warehouseId",
@@ -64,13 +76,13 @@ OUTPUT_COLUMNS = [
 
 
 # -----------------------------
-# Helpers
+# HTTP helpers
 # -----------------------------
 def _auth_headers() -> dict[str, str]:
     headers = {"Accept": "application/json"}
     if API_TOKEN:
         token = API_TOKEN.strip()
-        if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
+        if token.lower().startswith(("basic ", "bearer ")):
             headers["Authorization"] = token
         else:
             headers["Authorization"] = f"Bearer {token}"
@@ -78,9 +90,24 @@ def _auth_headers() -> dict[str, str]:
 
 
 def api_get_json(url: str, session: requests.Session) -> dict[str, Any]:
-    resp = session.get(url, headers=_auth_headers(), timeout=API_TIMEOUT_SECONDS)
-    resp.raise_for_status()
-    return resp.json()
+    """
+    IMPORTANT:
+    - Do NOT raise on non-2xx here. Return {"_error": "..."} to keep app alive.
+    """
+    try:
+        resp = session.get(url, headers=_auth_headers(), timeout=API_TIMEOUT_SECONDS)
+    except Exception as e:
+        return {"_error": f"Request failed: {e}"}
+
+    if not (200 <= resp.status_code < 300):
+        # keep error body short to avoid leaking anything sensitive
+        msg = f"HTTP {resp.status_code}"
+        return {"_error": msg}
+
+    try:
+        return resp.json()
+    except Exception as e:
+        return {"_error": f"Invalid JSON: {e}"}
 
 
 def normalize_tracking_ids(raw_ids: list[str], uppercase: bool = False) -> tuple[list[str], list[str], Counter]:
@@ -293,7 +320,6 @@ def extract_shipper_name_from_events(events: list[dict[str, Any]]) -> str:
 
 
 def best_route_no(failed_route: str, success_route: str) -> str:
-    # prefer success route, fallback to failed route
     r = (success_route or "").strip()
     if r:
         return r
@@ -325,45 +351,45 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 # -----------------------------
-# Reference data loaders (for filter UI & route mapping)
+# Reference loaders (never crash)
 # -----------------------------
 @st.cache_data(ttl=300)
-def load_routes() -> list[dict[str, Any]]:
+def load_routes() -> tuple[list[dict[str, Any]], str]:
     with requests.Session() as s:
         data = api_get_json(ROUTES_URL, s)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], str(data["_error"])
     routes = data.get("route")
-    return [r for r in routes if isinstance(r, dict)] if isinstance(routes, list) else []
+    if isinstance(routes, list):
+        return [r for r in routes if isinstance(r, dict)], ""
+    return [], "routes payload missing 'route' list"
 
 
 @st.cache_data(ttl=300)
-def load_warehouses() -> list[dict[str, Any]]:
+def load_warehouses() -> tuple[list[dict[str, Any]], str]:
     with requests.Session() as s:
         data = api_get_json(WAREHOUSES_URL, s)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], str(data["_error"])
     whs = data.get("warehouse")
-    return [w for w in whs if isinstance(w, dict)] if isinstance(whs, list) else []
+    if isinstance(whs, list):
+        return [w for w in whs if isinstance(w, dict)], ""
+    return [], "warehouses payload missing 'warehouse' list"
 
 
 @st.cache_data(ttl=300)
-def load_dsps() -> list[dict[str, Any]]:
+def load_dsps() -> tuple[list[dict[str, Any]], str]:
     with requests.Session() as s:
         data = api_get_json(DSPS_URL, s)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], str(data["_error"])
     dsps = data.get("companies")
-    return [d for d in dsps if isinstance(d, dict)] if isinstance(dsps, list) else []
+    if isinstance(dsps, list):
+        return [d for d in dsps if isinstance(d, dict)], ""
+    return [], "dsps payload missing 'companies' list"
 
 
 def build_route_index(routes: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
-    """
-    Index by routeNo:
-      {
-        "CA-IE01-02/28-DX-ALEX": {
-           "dateStr": "...",
-           "warehouseId": "...",
-           "warehouseName": "...",
-           "dspName": "...",
-           "driverName": "..."
-        }
-      }
-    """
     idx: dict[str, dict[str, str]] = {}
     for r in routes:
         route_no = str(r.get("routeNo") or "").strip()
@@ -377,14 +403,7 @@ def build_route_index(routes: list[dict[str, Any]]) -> dict[str, dict[str, str]]
         date_str = str(r.get("dateStr") or "").strip()
 
         dsp_name = str(r.get("companyName") or "").strip()
-
-        # driver fields vary; try a few
-        driver_name = str(
-            r.get("assigneeName")
-            or r.get("driverName")
-            or r.get("assignee")
-            or ""
-        ).strip()
+        driver_name = str(r.get("assigneeName") or r.get("driverName") or r.get("assignee") or "").strip()
 
         idx[route_no] = {
             "dateStr": date_str,
@@ -449,7 +468,6 @@ def build_row(tracking_id: str, payload: dict[str, Any], route_index: dict[str, 
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
         "送达时间": diff_hours(delivered_time, out_for_delivery_time),
         "整体配送时间": diff_hours(delivered_time, created_time),
-        # added
         "route_no": route_no,
         "dateStr": str(route_meta.get("dateStr", "")),
         "warehouseId": str(route_meta.get("warehouseId", "")),
@@ -473,10 +491,6 @@ def apply_filters(
     dsp_name: str,
     include_unknown: bool,
 ) -> pd.DataFrame:
-    """
-    Filter rows by dateStr / warehouseId / dspName.
-    If include_unknown=True: rows with missing meta fields are kept.
-    """
     out = df.copy()
 
     def _match(col: str, expected: str) -> pd.Series:
@@ -486,14 +500,10 @@ def apply_filters(
             return (out[col].astype(str) == expected) | (out[col].astype(str).str.strip() == "")
         return out[col].astype(str) == expected
 
-    # dateStr exact match
     if date_str and date_str != "__ALL__":
         out = out[_match("dateStr", date_str)]
-
     if warehouse_id and warehouse_id != "__ALL__":
         out = out[_match("warehouseId", warehouse_id)]
-
-    # dspName: exact match
     if dsp_name and dsp_name != "__ALL__":
         out = out[_match("dspName", dsp_name)]
 
@@ -507,41 +517,69 @@ def main() -> None:
     st.set_page_config(page_title="Tracking Export (Filtered)", layout="wide")
     st.title("Tracking Export (手动运单号 + 日期/仓库/DSP 筛选输出)")
 
-    if not API_TOKEN:
-        st.warning("未检测到 KPI_API_TOKEN（env）。如果接口需要鉴权，请先配置。")
+    with st.expander("配置状态 / Troubleshooting", expanded=not bool(API_TOKEN)):
+        st.write(f"KPI_API_TOKEN: {'已配置' if API_TOKEN else '未配置'}")
+        st.write(f"KPI_API_URL_TEMPLATE: {API_URL_TEMPLATE}")
+        st.write(f"ROUTES_URL: {ROUTES_URL}")
+        st.write(f"WAREHOUSES_URL: {WAREHOUSES_URL}")
+        st.write(f"DSPS_URL: {DSPS_URL}")
+        st.caption("如果在 Streamlit Cloud：请在 Secrets 里配置 KPI_API_TOKEN（或 Basic/Bearer 完整字符串）。")
 
-    # Load reference lists for dropdowns
+    # Load reference lists (never crash)
     with st.spinner("加载 routes / warehouses / DSP 列表..."):
-        routes = load_routes()
-        warehouses = load_warehouses()
-        dsps = load_dsps()
+        routes, routes_err = load_routes()
+        warehouses, wh_err = load_warehouses()
+        dsps, dsp_err = load_dsps()
+
+    if routes_err or wh_err or dsp_err:
+        st.warning(
+            "引用数据加载失败（不影响你手动运单号拉取 KPI，但会影响下拉筛选选项）。\n\n"
+            f"- routes: {routes_err or 'OK'}\n"
+            f"- warehouses: {wh_err or 'OK'}\n"
+            f"- dsps: {dsp_err or 'OK'}"
+        )
 
     route_index = build_route_index(routes)
 
-    # Build dropdown options
-    date_values = sorted({str(r.get("dateStr")) for r in routes if r.get("dateStr")}, reverse=True)
-    wh_options = []
-    wh_id_to_label: dict[str, str] = {}
-    for w in warehouses:
-        wh_id = str(w.get("listWarehouseId") or "").strip()
-        label = f'{w.get("name","")} | {w.get("formattedAddress", w.get("address",""))} | {wh_id}'
-        if wh_id:
-            wh_options.append(wh_id)
+    st.subheader("A) 筛选条件（用于筛选输出，不自动抓运单号）")
+
+    # If reference data missing, fall back to text inputs
+    use_dropdowns = bool(routes or warehouses or dsps)
+
+    if use_dropdowns:
+        date_values = sorted({str(r.get("dateStr")) for r in routes if r.get("dateStr")}, reverse=True)
+        dsp_name_values = sorted({str(d.get("companyName")) for d in dsps if d.get("companyName")})
+
+        wh_id_to_label: dict[str, str] = {}
+        wh_ids: list[str] = []
+        for w in warehouses:
+            wh_id = str(w.get("listWarehouseId") or "").strip()
+            if not wh_id:
+                continue
+            label = f'{w.get("name","")} | {w.get("formattedAddress", w.get("address",""))} | {wh_id}'
+            wh_ids.append(wh_id)
             wh_id_to_label[wh_id] = label
 
-    dsp_name_values = sorted({str(d.get("companyName")) for d in dsps if d.get("companyName")})
+        cfa, cfb, cfc, cfd = st.columns([2, 3, 3, 2])
+        picked_date = cfa.selectbox("日期 dateStr", options=["__ALL__"] + date_values, index=0)
+        picked_wh = cfb.selectbox(
+            "仓库 Warehouse",
+            options=["__ALL__"] + wh_ids,
+            format_func=lambda x: "全部" if x == "__ALL__" else wh_id_to_label.get(x, x),
+        )
+        picked_dsp = cfc.selectbox("DSP", options=["__ALL__"] + dsp_name_values, index=0)
+        include_unknown = cfd.checkbox("保留无路由信息的运单", value=False)
+    else:
+        cfa, cfb, cfc, cfd = st.columns([2, 3, 3, 2])
+        picked_date = cfa.text_input("日期 dateStr（留空=不过滤）", value="")
+        picked_wh = cfb.text_input("仓库 warehouseId（留空=不过滤）", value="")
+        picked_dsp = cfc.text_input("DSP 名称（留空=不过滤）", value="")
+        include_unknown = cfd.checkbox("保留无路由信息的运单", value=False)
 
-    st.subheader("A) 筛选条件（用于筛选输出的条目，不自动抓运单号）")
-    cfa, cfb, cfc, cfd = st.columns([2, 3, 3, 2])
-
-    picked_date = cfa.selectbox("日期 dateStr", options=["__ALL__"] + date_values, index=0)
-    picked_wh = cfb.selectbox(
-        "仓库 Warehouse",
-        options=["__ALL__"] + wh_options,
-        format_func=lambda x: "全部" if x == "__ALL__" else wh_id_to_label.get(x, x),
-    )
-    picked_dsp = cfc.selectbox("DSP", options=["__ALL__"] + dsp_name_values, index=0)
-    include_unknown = cfd.checkbox("保留无路由信息的运单", value=False)
+        # align with filter function expectations
+        picked_date = picked_date.strip() or "__ALL__"
+        picked_wh = picked_wh.strip() or "__ALL__"
+        picked_dsp = picked_dsp.strip() or "__ALL__"
 
     st.divider()
 
@@ -603,7 +641,6 @@ def main() -> None:
         ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
         result_df = pd.DataFrame(ordered_rows, columns=OUTPUT_COLUMNS)
 
-        # Apply filters AFTER fetching
         filtered_df = apply_filters(
             result_df,
             date_str=picked_date,
@@ -643,7 +680,7 @@ def main() -> None:
         st.subheader("E) 筛选结果预览")
         st.dataframe(filtered_df.head(100), use_container_width=True)
 
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S')")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_data = filtered_df.to_csv(index=False).encode("utf-8-sig")
 
         xlsx_data = None
@@ -670,12 +707,12 @@ def main() -> None:
         with st.expander("查看未筛选的全量结果（调试用）"):
             st.dataframe(result_df.head(100), use_container_width=True)
 
-        with st.expander("说明：筛选依据"):
+        with st.expander("筛选依据说明"):
             st.write(
-                "- 这里的 日期/仓库/DSP 筛选是通过运单 status_logs 里解析到的 route_no（success_route/failed_route）"
-                " 再去 routes 列表做 routeNo -> (dateStr, warehouseId, dspName, driverName) 的映射。\n"
-                "- 如果某些运单无法解析 route 或 routes 列表里没有该 routeNo，会导致 dateStr/warehouseId/dspName 为空。\n"
-                "- 你可以用“保留无路由信息的运单”决定是否让这些空值运单也出现在筛选结果里。"
+                "- 这版筛选依赖：从 status_logs 的 description 中解析 route_no（success_route/failed_route），"
+                "再在 routes 列表里用 routeNo 映射 dateStr / warehouseId / dspName / driverName。\n"
+                "- 如果运单无法解析 route，或 routes 列表拿不到，就会出现 dateStr/warehouseId/dspName 为空。\n"
+                "- 你可以用“保留无路由信息的运单”控制是否让这些空值也通过筛选。"
             )
 
 
