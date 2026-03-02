@@ -157,8 +157,8 @@ def fetch_routes(session: requests.Session) -> list[dict[str, Any]]:
     return payload.get("route") or payload.get("routes") or []
 
 
-def fetch_warehouses(session: requests.Session) -> dict[str, dict[str, Any]]:␊
-    payload = _get_json(session, "warehouses", params={"updatedAfter": 0})␊
+def fetch_warehouses(session: requests.Session) -> dict[str, dict[str, Any]]:
+    payload = _get_json(session, "warehouses", params={"updatedAfter": 0})
     items = payload.get("warehouse") or payload.get("warehouses") or []
     return {w.get("listWarehouseId"): w for w in items if w.get("listWarehouseId")}
 
@@ -375,6 +375,7 @@ def build_rows(
 
 if __name__ == "__main__":
     main()
+
 
 
 
