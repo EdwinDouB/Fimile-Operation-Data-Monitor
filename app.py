@@ -216,7 +216,6 @@ def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dic
 # Assembly
 # -----------------------------
 def build_rows(
-@@ -285,88 +291,110 @@ def main() -> None:
             """
 - Bearer：`BEANS_TOKEN`
 - Cookie：`BEANS_COOKIE`（例如 `_session_id=...`）
@@ -375,6 +374,7 @@ def build_rows(
 
 if __name__ == "__main__":
     main()
+
 
 
 
