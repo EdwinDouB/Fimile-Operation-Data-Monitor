@@ -50,11 +50,13 @@ def _headers() -> dict[str, str]:
         "Accept": "application/json",
         "User-Agent": "Fimile-Routes-Export/1.0",
     }
+    if BEANS_BASIC_AUTH:
+        h["Authorization"] = BEANS_BASIC_AUTH
     if BEANS_TOKEN:
         h["Authorization"] = f"Bearer {BEANS_TOKEN}"
     if BEANS_COOKIE:
         h["Cookie"] = BEANS_COOKIE
-    return h
+    return h h
 
 
 def _get_json(session: requests.Session, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -398,3 +400,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
