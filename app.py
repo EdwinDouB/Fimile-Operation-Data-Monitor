@@ -1,767 +1,682 @@
 import io
 import os
 import re
-from datetime import datetime, date
+from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import pandas as pd
 import requests
 import streamlit as st
 
-
 # -----------------------------
-# Config (prefer env vars)
+# Config (env only)
 # -----------------------------
-def _get_config(name: str, default: str = "") -> str:
-    """Read config from env first, then Streamlit secrets."""
-    val = os.getenv(name)
-    if val:
-        return val
-    try:
-        secret_val = st.secrets.get(name)
-    except Exception:  # noqa: BLE001
-        secret_val = None
-    if secret_val is None:
-        return default
-    return str(secret_val)
+API_URL_TEMPLATE = os.getenv(
+    "KPI_API_URL_TEMPLATE",
+    "https://isp.beans.ai/enterprise/v1/lists/status_logs"
+    "?tracking_id={tracking_id}&readable=true"
+    "&include_pod=true&include_item=true",
+)
+API_TOKEN = os.getenv("KPI_API_TOKEN", "")
+API_TIMEOUT_SECONDS = int(os.getenv("KPI_API_TIMEOUT_SECONDS", "20"))
 
+# Reference endpoints for filtering (routes/warehouses/DSP lists)
+ROUTES_URL = os.getenv(
+    "KPI_ROUTES_URL",
+    "https://isp.beans.ai/enterprise/v1/lists/routes?updatedAfter=0&includeToday=true",
+)
+WAREHOUSES_URL = os.getenv(
+    "KPI_WAREHOUSES_URL",
+    "https://isp.beans.ai/enterprise/v1/lists/warehouses?updatedAfter=0",
+)
+DSPS_URL = os.getenv(
+    "KPI_DSPS_URL",
+    "https://isp.beans.ai/enterprise/v1/lists/thirdparty_companies",
+)
 
-BASE_URL = _get_config("BEANS_BASE_URL", "https://isp.beans.ai/enterprise/v1/lists")
-API_TIMEOUT_SECONDS = int(_get_config("BEANS_TIMEOUT_SECONDS", "30"))
-
-# Use ONE of these auth methods:
-# 1) Basic auth:  export BEANS_BASIC_AUTH="Basic <base64>"
-#    (You can copy the whole 'Basic ...' string from your teammate / DevTools)
-# 2) Bearer token: export BEANS_TOKEN="..."
-# 3) Cookie session: export BEANS_COOKIE="_session_id=...; other_cookie=..."
-BEANS_BASIC_AUTH = _get_config("BEANS_BASIC_AUTH", "")
-BEANS_TOKEN = _get_config("BEANS_TOKEN", "")
-# Backward-compatible aliases used by earlier internal scripts.␊
-KPI_API_TOKEN = _get_config("KPI_API_TOKEN", "")
-KPI_API_BASIC_AUTH = _get_config("KPI_API_BASIC_AUTH", "")
-BEANS_COOKIE = _get_config("BEANS_COOKIE", "")
-
-# Account buid list for routes_metrics (comma separated)
-# Example: export BEANS_ACCOUNT_BUIDS="2c1e8ad1e59945579fa2a992e93932d6"
-BEANS_ACCOUNT_BUIDS = _get_config("BEANS_ACCOUNT_BUIDS", "")
-
+# Output (keep your original columns + add filter-related columns)
 OUTPUT_COLUMNS = [
-    "route_code",
-    "date",
-    "start_address",
-    "dsp",
-    "driver",
-    "dsp_driver",
-    "delivery_count",
-    "pickup_count",
-    "failed_count",
-    "listRouteId",
-    "listWarehouseId",
-    "listAssigneeId",
+    "trakcing_id",
+    "shipperName",
+    "created_time",
+    "first_scanned_time",
+    "last_scanned_time",
+    "out_for_delivery_time",
+    "attempted_time",
+    "failed_route",
+    "delivered_time",
+    "success_route",
+    "创建到入库时间",
+    "库内停留时间",
+    "尝试配送时间",
+    "送达时间",
+    "整体配送时间",
+    # added (for filtering & visibility)
+    "route_no",
+    "dateStr",
+    "warehouseId",
+    "warehouseName",
+    "dspName",
+    "driverName",
 ]
 
-REPORT_COLUMNS = [
-    "date",
-    "route_name",
-    "address",
-    "package_number",
-    "assignee_name",
-    "list_route_id",
-]
 
 # -----------------------------
 # Helpers
 # -----------------------------
-def _headers() -> dict[str, str]:
-    h = {
-        "Accept": "application/json",
-        "User-Agent": "Fimile-Routes-Export/1.0",
-    }
-    auth_header = (
-        BEANS_BASIC_AUTH.strip()
-        or KPI_API_BASIC_AUTH.strip()
-        or BEANS_TOKEN.strip()
-        or KPI_API_TOKEN.strip()
-    )
-    if auth_header:
-        if auth_header.lower().startswith(("basic ", "bearer ")):
-            h["Authorization"] = auth_header
+def _auth_headers() -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if API_TOKEN:
+        token = API_TOKEN.strip()
+        if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
+            headers["Authorization"] = token
         else:
-            h["Authorization"] = f"Bearer {auth_header}"
-    if BEANS_COOKIE:
-        h["Cookie"] = BEANS_COOKIE
-    return h
+            headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
-def _auth_status_summary() -> str:
-    has_auth = bool(_headers().get("Authorization"))
-    has_cookie = bool(BEANS_COOKIE.strip())
-    if has_auth and has_cookie:
-        return "Authorization + Cookie"
-    if has_auth:
-        return "Authorization"
-    if has_cookie:
-        return "Cookie"
-    return "none"
+def api_get_json(url: str, session: requests.Session) -> dict[str, Any]:
+    resp = session.get(url, headers=_auth_headers(), timeout=API_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json()
 
 
-def _get_json(session: requests.Session, path: str, params: dict[str, Any] | None = None) -> Any:
-    url = f"{BASE_URL.rstrip('/')}/{path.lstrip('/')}"
-    r = session.get(url, headers=_headers(), params=params, timeout=API_TIMEOUT_SECONDS)
-    r.raise_for_status()
-    return r.json()
+def normalize_tracking_ids(raw_ids: list[str], uppercase: bool = False) -> tuple[list[str], list[str], Counter]:
+    cleaned: list[str] = []
+    for value in raw_ids:
+        item = str(value).strip()
+        if not item:
+            continue
+        cleaned.append(item.upper() if uppercase else item)
+
+    counter = Counter(cleaned)
+    unique_ids: list[str] = []
+    seen: set[str] = set()
+    for item in cleaned:
+        if item not in seen:
+            seen.add(item)
+            unique_ids.append(item)
+    return cleaned, unique_ids, counter
 
 
-def _humanize_error(e: Exception) -> str:
-    if isinstance(e, requests.HTTPError):
-        res = e.response
-        if res is not None:
-            status = res.status_code
-            url = res.url
-            hint = ""
-            if status in {401, 403}:
-                hint = "（鉴权失败或账号无权限：请检查 BEANS_TOKEN / BEANS_BASIC_AUTH / BEANS_COOKIE）"
-            elif status == 404:
-                hint = "（接口不存在或当前账号不可见）"
-            return f"HTTP {status} @ {url}{hint}"
-    return str(e)
+def split_text_ids(text: str) -> list[str]:
+    if not text:
+        return []
+    return [x for x in re.split(r"[\s,]+", text) if x]
 
 
-def _safe_str(x: Any) -> str:
-    return "" if x is None else str(x)
+def read_uploaded_ids(uploaded_file) -> list[str]:
+    if uploaded_file is None:
+        return []
+    name = uploaded_file.name.lower()
+    try:
+        if name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file, dtype=str)
+        elif name.endswith(".xlsx"):
+            df = pd.read_excel(uploaded_file, dtype=str)
+        else:
+            return []
+    except Exception:
+        return []
+
+    if df.empty:
+        return []
+
+    preferred = [c for c in df.columns if str(c).lower() in {"tracking_id", "trackingid", "trakcing_id"}]
+    if preferred:
+        series = df[preferred[0]].dropna()
+        return series.astype(str).tolist()
+
+    values: list[str] = []
+    for col in df.columns:
+        values.extend(df[col].dropna().astype(str).tolist())
+    return values
 
 
-def _extract_dsp(route_name: str) -> str:
-    """
-    Infer DSP code from route name.
-    Examples:
-      - "CA-IE01-02/28-DX-ALEX" -> "DX"
-      - "TX-0227 - 1 - CBC-Andres" -> "CBC"
-    """
-    s = route_name.strip()
-
-    # Pattern like "...-DX-ALEX" at end
-    m = re.search(r"-([A-Z]{2,6})-[A-Z0-9]+$", s)
-    if m:
-        return m.group(1)
-
-    # Pattern like "... CBC-Andres"
-    m = re.search(r"\b([A-Z]{2,6})-[A-Za-z]", s)
-    if m:
-        return m.group(1)
-
-    return ""
+def to_local_dt(ts_millis: Any) -> datetime | None:
+    if ts_millis is None:
+        return None
+    try:
+        millis = int(ts_millis)
+        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).astimezone()
+    except (ValueError, TypeError, OSError):
+        return None
 
 
-def _normalize_date_str(raw: Any) -> str:
-    s = _safe_str(raw).strip()
-    if not s:
+def fmt_dt(dt: datetime | None) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def diff_hours(end_dt: datetime | None, start_dt: datetime | None) -> str:
+    if not end_dt or not start_dt:
         return ""
-
-    try:
-        return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
-    except Exception:
-        pass
-
-    try:
-        return datetime.strptime(s, "%m/%d/%Y").strftime("%Y-%m-%d")
-    except Exception:
-        pass
-
-    if s.isdigit():
-        ts = int(s)
-        if ts > 10_000_000_000:
-            ts = ts / 1000
-        try:
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-        except Exception:
-            pass
-
-    return ""
+    return f"{(end_dt - start_dt).total_seconds() / 3600:.2f}"
 
 
-def _parse_date(route: dict[str, Any]) -> str:
-    for k in [
-        "dateStr",
-        "date",
-        "routeDate",
-        "routeDateStr",
-        "startDate",
-        "scheduledDate",
-        "startTsMillis",
-        "routeTsMillis",
-    ]:
-        ds = _normalize_date_str(route.get(k))
-        if ds:
-            return ds
-
-    name = _safe_str(route.get("name"))
-    m = re.search(r"(\d{2})/(\d{2})", name)
-    if m:
-        mm = int(m.group(1))
-        dd = int(m.group(2))
-        year = int(os.getenv("BEANS_DEFAULT_YEAR", str(datetime.now().year)))
-        return f"{year:04d}-{mm:02d}-{dd:02d}"
-    return ""
+def parse_route(description: Any) -> str:
+    text = "" if description is None else str(description)
+    match = re.search(r"route[:：\s-]*(.+)$", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
 
 
-def _compute_planned_actual(stop_metrics: list[dict[str, Any]] | None, metric_type: str) -> tuple[int, int]:
-    planned = 0
-    actual = 0
-    for x in stop_metrics or []:
-        metric_kind = _safe_str(x.get("type") or x.get("metricType") or x.get("stopType")).lower()
-        if metric_kind != metric_type.lower():
-            continue
-        pc = int(x.get("packageCount") or x.get("count") or x.get("plannedCount") or 0)
-        planned += pc
-        actual_raw = x.get("actualCount")
-        if actual_raw is not None:
-            actual += int(actual_raw or 0)
-            continue
-
-        if _safe_str(x.get("status") or x.get("metricStatus")).lower() in {
-            "finished",
-            "success",
-            "succeeded",
-            "completed",
-        }:
-            actual += pc
-    return planned, actual
-
-
-def _compute_failed_count(stop_metrics: list[dict[str, Any]] | None) -> int:
-    total = 0
-    failed_types = {"failed", "fail", "attempted", "attempt"}
-    for x in stop_metrics or []:
-        tp = _safe_str(x.get("type") or x.get("metricType") or x.get("stopType")).lower()
-        status = _safe_str(x.get("status") or x.get("metricStatus")).lower()
-        if tp in failed_types or status in failed_types:
-            total += int(x.get("packageCount") or x.get("count") or x.get("plannedCount") or 0)
-    return total
-
-
-def _to_excel_bytes(df: pd.DataFrame) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="routes")
-    buf.seek(0)
-    return buf.read()
-
-
-def _parse_csv_extra_buids(raw: str) -> str:
-    items = [x.strip() for x in (raw or "").split(",") if x.strip()]
-    return ",".join(items)
-
-
-def _date_in_range(ds: str, start: date | None, end: date | None) -> bool:
-    if not (start or end):
-        return True
-    if not ds:
-        return False
-    try:
-        d = datetime.strptime(ds, "%Y-%m-%d").date()
-    except Exception:
-        return False
-    if start and d < start:
-        return False
-    if end and d > end:
-        return False
-    return True
-
-
-# -----------------------------
-# Fetchers
-# -----------------------------
-def fetch_routes(
-    session: requests.Session,
-    start_date: date | None = None,
-    end_date: date | None = None,
-) -> list[dict[str, Any]]:
-    params: dict[str, Any] = {
-        "updatedAfter": 0,
-        "includeToday": "true",
-        "includePast": "true",
-        "includeFuture": "true",
-    }
-    if start_date:
-        sd = start_date.strftime("%Y-%m-%d")
-        params.update(
-            {
-                "startDate": sd,
-                "dateFrom": sd,
-                "fromDate": sd,
-                "routeDateFrom": sd,
-            }
-        )
-    if end_date:
-        ed = end_date.strftime("%Y-%m-%d")
-        params.update(
-            {
-                "endDate": ed,
-                "dateTo": ed,
-                "toDate": ed,
-                "routeDateTo": ed,
-            }
-        )
-
-    # Some tenants return only recent items unless pagination params are provided.
-    # We request pages and merge unique routes by listRouteId.
-    page_size = 500
-    all_routes: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-
-    for page in range(1, 51):
-        paged_params = {
-            **params,
-            "page": page,
-            "pageSize": page_size,
-            "limit": page_size,
-            "offset": (page - 1) * page_size,
-        }
-        payload = _get_json(session, "routes", params=paged_params)
-        items = payload.get("route") or payload.get("routes") or []
-        if not items:
-            break
-
-        appended = 0
-        for r in items:
-            rid = _safe_str(r.get("listRouteId"))
-            key = rid or _safe_str(r.get("name"))
-            if key in seen_ids:
-                continue
-            seen_ids.add(key)
-            all_routes.append(r)
-            appended += 1
-
-        if appended == 0 or len(items) < page_size:
-            break
-
-    return all_routes
-
-
-def _extract_reference_from_routes(
-    routes: list[dict[str, Any]], key: str, id_key: str
-) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    for r in routes:
-        ref = r.get(key) or {}
-        if not isinstance(ref, dict):
-            continue
-        ref_id = ref.get(id_key)
-        if not ref_id:
-            continue
-        current = out.get(ref_id, {})
-        merged = {**current, **ref}
-        out[ref_id] = merged
-    return out
-
-
-def fetch_warehouses(session: requests.Session) -> dict[str, dict[str, Any]]:
-    try:
-        payload = _get_json(session, "warehouses", params={"updatedAfter": 0})
-        items = payload.get("warehouse") or payload.get("warehouses") or []
-        return {w.get("listWarehouseId"): w for w in items if w.get("listWarehouseId")}
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
-        # Some accounts are forbidden to read /warehouses directly.
-        # Fall back to route payload, which usually embeds warehouse info.
-        if status in {401, 403, 404}:
-            routes = fetch_routes(session)
-            return _extract_reference_from_routes(routes, key="warehouse", id_key="listWarehouseId")
-        raise
-
-
-def fetch_assignees(session: requests.Session) -> dict[str, dict[str, Any]]:
-    try:
-        payload = _get_json(session, "assignees", params={"updatedAfter": 0})
-        items = payload.get("assignee") or payload.get("assignees") or []
-        return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
-        # Some accounts are forbidden to read /assignees directly.
-        # Fall back to route payload, which usually embeds assignee info.
-        if status in {401, 403, 404}:
-            routes = fetch_routes(session)
-            return _extract_reference_from_routes(routes, key="assignee", id_key="listAssigneeId")
-        raise
-
-
-def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dict[str, dict[str, Any]]:
-    params: dict[str, Any] = {}
-    if csv_extra_buids:
-        params["csvExtraAccountBuidsList"] = csv_extra_buids
-
-    payload = _get_json(session, "routes_metrics", params=params)
+def normalize_events(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
-        items = payload
-    else:
-        items = payload.get("routesMetrics") or payload.get("routeMetrics") or payload.get("metrics") or []
+        return [e for e in payload if isinstance(e, dict)]
+    if not isinstance(payload, dict):
+        return []
 
-    out: dict[str, dict[str, Any]] = {}
-    for m in items:
-        rid = _safe_str(m.get("listRouteId") or m.get("routeId") or m.get("id"))
-        route_code = _safe_str(m.get("routeCode") or m.get("name"))
-        if rid:
-            out[rid] = m
-        if route_code:
-            out[route_code] = m
-    return out
+    root = payload
+    for key in ("data", "result", "response"):
+        if isinstance(root.get(key), dict):
+            root = root[key]
+            break
 
-
-def fetch_routes_report(
-    session: requests.Session,
-    from_date: date,
-    to_date: date,
-    route_name: str = "",
-    address: str = "",
-    package_number: str = "",
-    assignee_name: str = "",
-) -> list[dict[str, Any]]:
-    base_params: dict[str, Any] = {}
-    if route_name.strip():
-        base_params["route_name"] = route_name.strip()
-    if address.strip():
-        base_params["address"] = address.strip()
-    if package_number.strip():
-        base_params["package_number"] = package_number.strip()
-    if assignee_name.strip():
-        base_params["assignee_name"] = assignee_name.strip()
-
-    # Some tenants require from_date/to_date while others accept date_from/date_to.
-    # Try the documented from_date/to_date first, then fall back for compatibility.
-    param_candidates = [
-        {
-            **base_params,
-            "from_date": from_date.strftime("%Y-%m-%d"),
-            "to_date": to_date.strftime("%Y-%m-%d"),
-        },
-        {
-            **base_params,
-            "date_from": from_date.strftime("%Y-%m-%d"),
-            "date_to": to_date.strftime("%Y-%m-%d"),
-        },
+    candidates = [
+        root.get("listItemReadableStatusLogs"),
+        root.get("listItemStatusLogs"),
+        root.get("status_logs"),
+        root.get("statusLogs"),
+        root.get("logs"),
+        root.get("events"),
+        root.get("trackingEvents"),
+        root.get("history"),
+        root.get("checkpoints"),
     ]
-
-    last_error: Exception | None = None
-    for params in param_candidates:
-        try:
-            payload = _get_json(session, "items/do/report", params=params)
-            if isinstance(payload, list):
-                return payload
-            return payload.get("items") or payload.get("data") or payload.get("report") or []
-        except requests.HTTPError as e:
-            last_error = e
-            continue
-
-    if last_error is not None:
-        raise last_error
+    for events in candidates:
+        if isinstance(events, list):
+            return [e for e in events if isinstance(e, dict)]
     return []
 
 
-def build_report_rows(report_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for item in report_items:
-        rows.append(
-            {
-                "date": _normalize_date_str(item.get("date") or item.get("dateStr") or item.get("routeDate")),
-                "route_name": _safe_str(item.get("route_name") or item.get("routeName") or item.get("name")),
-                "address": _safe_str(item.get("address") or item.get("formattedAddress")),
-                "package_number": _safe_str(
-                    item.get("package_number") or item.get("packageNumber") or item.get("trackingId")
-                ),
-                "assignee_name": _safe_str(
-                    item.get("assignee_name") or item.get("assigneeName") or item.get("driver")
-                ),
-                "list_route_id": _safe_str(item.get("list_route_id") or item.get("listRouteId") or item.get("routeId")),
-            }
-        )
-    return rows
+def event_type(event: dict[str, Any]) -> str:
+    for key in ("type", "eventType", "status"):
+        val = event.get(key)
+        if val:
+            return str(val).strip().lower().replace("_", "-")
+
+    log_item = event.get("logItem")
+    if isinstance(log_item, dict):
+        for key in ("type", "eventType", "status"):
+            val = log_item.get(key)
+            if val:
+                return str(val).strip().lower().replace("_", "-")
+
+    log_obj = event.get("log")
+    if isinstance(log_obj, dict):
+        for key in ("type", "eventType", "status"):
+            val = log_obj.get(key)
+            if val:
+                return str(val).strip().lower().replace("_", "-")
+
+    return ""
+
+
+def event_ts(event: dict[str, Any]) -> int | None:
+    pod = event.get("pod")
+    if isinstance(pod, dict) and pod.get("podTimestampEpoch") is not None:
+        try:
+            return int(float(pod.get("podTimestampEpoch")) * 1000)
+        except (TypeError, ValueError):
+            pass
+
+    log_item = event.get("logItem")
+    if isinstance(log_item, dict):
+        log_item_pod = log_item.get("pod")
+        if isinstance(log_item_pod, dict) and log_item_pod.get("podTimestampEpoch") is not None:
+            try:
+                return int(float(log_item_pod.get("podTimestampEpoch")) * 1000)
+            except (TypeError, ValueError):
+                pass
+        for key in ("tsMillis", "timestamp", "ts", "timeMillis"):
+            val = log_item.get(key)
+            try:
+                if val is not None:
+                    return int(val)
+            except (ValueError, TypeError):
+                continue
+
+    log_obj = event.get("log")
+    if isinstance(log_obj, dict):
+        log_pod = log_obj.get("pod")
+        if isinstance(log_pod, dict) and log_pod.get("podTimestampEpoch") is not None:
+            try:
+                return int(float(log_pod.get("podTimestampEpoch")) * 1000)
+            except (TypeError, ValueError):
+                pass
+        for key in ("tsMillis", "timestamp", "ts", "timeMillis"):
+            val = log_obj.get(key)
+            try:
+                if val is not None:
+                    return int(val)
+            except (ValueError, TypeError):
+                continue
+
+    for key in ("tsMillis", "timestamp", "ts", "timeMillis"):
+        val = event.get(key)
+        try:
+            if val is not None:
+                return int(val)
+        except (ValueError, TypeError):
+            continue
+
+    return None
+
+
+def first_event_by_predicate(events: list[dict[str, Any]], predicate) -> dict[str, Any] | None:
+    filtered = [e for e in events if predicate(e)]
+    if not filtered:
+        return None
+    with_ts = [(event_ts(e), idx, e) for idx, e in enumerate(filtered)]
+    with_ts.sort(key=lambda x: (10**18 if x[0] is None else x[0], x[1]))
+    return with_ts[0][2]
+
+
+def last_event_by_predicate(events: list[dict[str, Any]], predicate) -> dict[str, Any] | None:
+    filtered = [e for e in events if predicate(e)]
+    if not filtered:
+        return None
+    with_ts = [(event_ts(e), idx, e) for idx, e in enumerate(filtered)]
+    with_ts.sort(key=lambda x: (-1 if x[0] is None else x[0], x[1]))
+    return with_ts[-1][2]
+
+
+def extract_shipper_name_from_events(events: list[dict[str, Any]]) -> str:
+    for event in events:
+        item = event.get("item")
+        if isinstance(item, dict):
+            name = item.get("shipperName")
+            if name:
+                return str(name)
+    return ""
+
+
+def best_route_no(failed_route: str, success_route: str) -> str:
+    # prefer success route, fallback to failed route
+    r = (success_route or "").strip()
+    if r:
+        return r
+    return (failed_route or "").strip()
+
+
+def fetch_tracking_data(tracking_id: str, session: requests.Session) -> dict[str, Any]:
+    if not API_URL_TEMPLATE:
+        raise RuntimeError("KPI_API_URL_TEMPLATE 未配置")
+
+    if "{tracking_id}" in API_URL_TEMPLATE:
+        url = API_URL_TEMPLATE.format(tracking_id=tracking_id)
+    else:
+        parsed = urlparse(API_URL_TEMPLATE)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["tracking_id"] = tracking_id
+        url = urlunparse(parsed._replace(query=urlencode(query)))
+
+    resp = session.get(url, headers=_auth_headers(), timeout=API_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="export")
+    return output.getvalue()
 
 
 # -----------------------------
-# Assembly
+# Reference data loaders (for filter UI & route mapping)
 # -----------------------------
-def build_rows(
-    routes: list[dict[str, Any]],
-    metrics_by_route: dict[str, dict[str, Any]],
-    wh_by_id: dict[str, dict[str, Any]],
-    asg_by_id: dict[str, dict[str, Any]],
-    start_date: date | None,
-    end_date: date | None,
-    warehouse_filter: str,
-    name_contains: str,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    name_contains_lc = (name_contains or "").strip().lower()
+@st.cache_data(ttl=300)
+def load_routes() -> list[dict[str, Any]]:
+    with requests.Session() as s:
+        data = api_get_json(ROUTES_URL, s)
+    routes = data.get("route")
+    return [r for r in routes if isinstance(r, dict)] if isinstance(routes, list) else []
 
+
+@st.cache_data(ttl=300)
+def load_warehouses() -> list[dict[str, Any]]:
+    with requests.Session() as s:
+        data = api_get_json(WAREHOUSES_URL, s)
+    whs = data.get("warehouse")
+    return [w for w in whs if isinstance(w, dict)] if isinstance(whs, list) else []
+
+
+@st.cache_data(ttl=300)
+def load_dsps() -> list[dict[str, Any]]:
+    with requests.Session() as s:
+        data = api_get_json(DSPS_URL, s)
+    dsps = data.get("companies")
+    return [d for d in dsps if isinstance(d, dict)] if isinstance(dsps, list) else []
+
+
+def build_route_index(routes: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """
+    Index by routeNo:
+      {
+        "CA-IE01-02/28-DX-ALEX": {
+           "dateStr": "...",
+           "warehouseId": "...",
+           "warehouseName": "...",
+           "dspName": "...",
+           "driverName": "..."
+        }
+      }
+    """
+    idx: dict[str, dict[str, str]] = {}
     for r in routes:
-        route_id = r.get("listRouteId")
-        route_code = _safe_str(r.get("name"))
-
-        ds = _parse_date(r)
-        if not _date_in_range(ds, start_date, end_date):
+        route_no = str(r.get("routeNo") or "").strip()
+        if not route_no:
             continue
 
-        wh_id = (r.get("warehouse") or {}).get("listWarehouseId") or ""
-        if warehouse_filter and wh_id != warehouse_filter:
-            continue
+        wh = r.get("warehouse") if isinstance(r.get("warehouse"), dict) else {}
+        warehouse_id = str(wh.get("listWarehouseId") or "").strip()
+        warehouse_name = str(wh.get("name") or wh.get("formattedAddress") or "").strip()
 
-        if name_contains_lc and name_contains_lc not in route_code.lower():
-            continue
+        date_str = str(r.get("dateStr") or "").strip()
 
-        start_addr = ""
-        if wh_id and wh_id in wh_by_id:
-            w = wh_by_id[wh_id]
-            start_addr = _safe_str(w.get("formattedAddress") or w.get("address") or w.get("name") or "")
+        dsp_name = str(r.get("companyName") or "").strip()
 
-        asg_id = (r.get("assignee") or {}).get("listAssigneeId") or ""
-        driver = ""
-        if asg_id and asg_id in asg_by_id:
-            driver = _safe_str(asg_by_id[asg_id].get("name") or "")
+        # driver fields vary; try a few
+        driver_name = str(
+            r.get("assigneeName")
+            or r.get("driverName")
+            or r.get("assignee")
+            or ""
+        ).strip()
 
-        dsp = _extract_dsp(route_code)
-        dsp_driver = "-".join([x for x in [dsp, driver] if x])
+        idx[route_no] = {
+            "dateStr": date_str,
+            "warehouseId": warehouse_id,
+            "warehouseName": warehouse_name,
+            "dspName": dsp_name,
+            "driverName": driver_name,
+        }
+    return idx
 
-        m = metrics_by_route.get(_safe_str(route_id), {}) or metrics_by_route.get(route_code, {})
-        stop_metrics = (
-            m.get("stopMetrics")
-            or m.get("metrics")
-            or m.get("routeMetrics")
-            or m.get("stopLevelMetrics")
-            or []
-        )
-        d_plan, d_act = _compute_planned_actual(stop_metrics, "dropoff")
-        if d_plan == 0 and d_act == 0:
-            d_plan, d_act = _compute_planned_actual(stop_metrics, "delivery")
-        p_plan, p_act = _compute_planned_actual(stop_metrics, "pickup")
-        failed_count = _compute_failed_count(stop_metrics)
 
-        rows.append(
-            {
-                "route_code": route_code,
-                "date": ds,
-                "start_address": start_addr,
-                "dsp": dsp,
-                "driver": driver,
-                "dsp_driver": dsp_driver,
-                "delivery_count": f"{d_plan}/{d_act}",
-                "pickup_count": f"{p_plan}/{p_act}",
-                "failed_count": failed_count,
-                "listRouteId": _safe_str(route_id),
-                "listWarehouseId": _safe_str(wh_id),
-                "listAssigneeId": _safe_str(asg_id),
-            }
-        )
-    return rows
+def build_row(tracking_id: str, payload: dict[str, Any], route_index: dict[str, dict[str, str]]) -> dict[str, str]:
+    events = normalize_events(payload)
+    shipper_name = extract_shipper_name_from_events(events)
+
+    created_evt = first_event_by_predicate(events, lambda e: event_type(e) == "label")
+
+    scanned_predicate = lambda e: (
+        (desc := str(e.get("description", "")).strip().lower()).startswith("scan at")
+        or desc.startswith("scanned at")
+    )
+    first_scanned_evt = first_event_by_predicate(events, scanned_predicate)
+    last_scanned_evt = last_event_by_predicate(events, scanned_predicate)
+
+    ofd_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
+    fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
+    success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
+
+    created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
+    first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
+    last_scanned_time = to_local_dt(event_ts(last_scanned_evt) if last_scanned_evt else None)
+    out_for_delivery_time = to_local_dt(event_ts(ofd_evt) if ofd_evt else None)
+    attempted_time = to_local_dt(event_ts(fail_evt) if fail_evt else None)
+    delivered_time = to_local_dt(event_ts(success_evt) if success_evt else None)
+
+    failed_route = parse_route(fail_evt.get("description")) if fail_evt else ""
+    success_route = parse_route(success_evt.get("description")) if success_evt else ""
+
+    route_no = best_route_no(failed_route, success_route)
+    route_meta = route_index.get(route_no, {}) if route_no else {}
+
+    row: dict[str, str] = {
+        "trakcing_id": tracking_id,
+        "shipperName": str(
+            shipper_name
+            or payload.get("shipperName")
+            or payload.get("data", {}).get("shipperName")
+            or payload.get("result", {}).get("shipperName")
+            or payload.get("response", {}).get("shipperName")
+            or ""
+        ),
+        "created_time": fmt_dt(created_time),
+        "first_scanned_time": fmt_dt(first_scanned_time),
+        "last_scanned_time": fmt_dt(last_scanned_time),
+        "out_for_delivery_time": fmt_dt(out_for_delivery_time),
+        "attempted_time": fmt_dt(attempted_time),
+        "failed_route": failed_route,
+        "delivered_time": fmt_dt(delivered_time),
+        "success_route": success_route,
+        "创建到入库时间": diff_hours(first_scanned_time, created_time),
+        "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
+        "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
+        "送达时间": diff_hours(delivered_time, out_for_delivery_time),
+        "整体配送时间": diff_hours(delivered_time, created_time),
+        # added
+        "route_no": route_no,
+        "dateStr": str(route_meta.get("dateStr", "")),
+        "warehouseId": str(route_meta.get("warehouseId", "")),
+        "warehouseName": str(route_meta.get("warehouseName", "")),
+        "dspName": str(route_meta.get("dspName", "")),
+        "driverName": str(route_meta.get("driverName", "")),
+    }
+    return row
+
+
+def empty_row(tracking_id: str) -> dict[str, str]:
+    row = {col: "" for col in OUTPUT_COLUMNS}
+    row["trakcing_id"] = tracking_id
+    return row
+
+
+def apply_filters(
+    df: pd.DataFrame,
+    date_str: str,
+    warehouse_id: str,
+    dsp_name: str,
+    include_unknown: bool,
+) -> pd.DataFrame:
+    """
+    Filter rows by dateStr / warehouseId / dspName.
+    If include_unknown=True: rows with missing meta fields are kept.
+    """
+    out = df.copy()
+
+    def _match(col: str, expected: str) -> pd.Series:
+        if not expected or expected == "__ALL__":
+            return pd.Series([True] * len(out), index=out.index)
+        if include_unknown:
+            return (out[col].astype(str) == expected) | (out[col].astype(str).str.strip() == "")
+        return out[col].astype(str) == expected
+
+    # dateStr exact match
+    if date_str and date_str != "__ALL__":
+        out = out[_match("dateStr", date_str)]
+
+    if warehouse_id and warehouse_id != "__ALL__":
+        out = out[_match("warehouseId", warehouse_id)]
+
+    # dspName: exact match
+    if dsp_name and dsp_name != "__ALL__":
+        out = out[_match("dspName", dsp_name)]
+
+    return out
 
 
 # -----------------------------
-# Streamlit App
+# App
 # -----------------------------
 def main() -> None:
-    st.set_page_config(page_title="Routes Ops Export", layout="wide")
-    st.title("Routes Ops Export")
+    st.set_page_config(page_title="Tracking Export (Filtered)", layout="wide")
+    st.title("Tracking Export (手动运单号 + 日期/仓库/DSP 筛选输出)")
 
-    with st.expander("运行前准备（鉴权放环境变量）"):
-        st.markdown(
-            """
-- Bearer：`BEANS_TOKEN`
-- Cookie：`BEANS_COOKIE`（例如 `_session_id=...`）
-- routes_metrics：`BEANS_ACCOUNT_BUIDS`（逗号分隔）
-            """.strip()
-        )
-        st.caption(f"当前检测到鉴权方式：{_auth_status_summary()}")
+    if not API_TOKEN:
+        st.warning("未检测到 KPI_API_TOKEN（env）。如果接口需要鉴权，请先配置。")
 
-    # Session state
-    if "warehouses" not in st.session_state:
-        st.session_state["warehouses"] = {}
-    if "assignees" not in st.session_state:
-        st.session_state["assignees"] = {}
+    # Load reference lists for dropdowns
+    with st.spinner("加载 routes / warehouses / DSP 列表..."):
+        routes = load_routes()
+        warehouses = load_warehouses()
+        dsps = load_dsps()
+
+    route_index = build_route_index(routes)
+
+    # Build dropdown options
+    date_values = sorted({str(r.get("dateStr")) for r in routes if r.get("dateStr")}, reverse=True)
+    wh_options = []
+    wh_id_to_label: dict[str, str] = {}
+    for w in warehouses:
+        wh_id = str(w.get("listWarehouseId") or "").strip()
+        label = f'{w.get("name","")} | {w.get("formattedAddress", w.get("address",""))} | {wh_id}'
+        if wh_id:
+            wh_options.append(wh_id)
+            wh_id_to_label[wh_id] = label
+
+    dsp_name_values = sorted({str(d.get("companyName")) for d in dsps if d.get("companyName")})
+
+    st.subheader("A) 筛选条件（用于筛选输出的条目，不自动抓运单号）")
+    cfa, cfb, cfc, cfd = st.columns([2, 3, 3, 2])
+
+    picked_date = cfa.selectbox("日期 dateStr", options=["__ALL__"] + date_values, index=0)
+    picked_wh = cfb.selectbox(
+        "仓库 Warehouse",
+        options=["__ALL__"] + wh_options,
+        format_func=lambda x: "全部" if x == "__ALL__" else wh_id_to_label.get(x, x),
+    )
+    picked_dsp = cfc.selectbox("DSP", options=["__ALL__"] + dsp_name_values, index=0)
+    include_unknown = cfd.checkbox("保留无路由信息的运单", value=False)
+
+    st.divider()
+
+    st.subheader("B) 手动输入 Tracking IDs")
+    mode = st.radio("输入方式", ["上传文件", "文本粘贴"], horizontal=True)
+    raw_ids: list[str] = []
+    if mode == "上传文件":
+        file = st.file_uploader("上传 CSV 或 XLSX", type=["csv", "xlsx"])
+        raw_ids = read_uploaded_ids(file)
+    else:
+        text = st.text_area("粘贴 Tracking IDs（支持换行/逗号/空格分隔）", height=180)
+        raw_ids = split_text_ids(text)
+
+    cleaned, dedup_ids, counter = normalize_tracking_ids(raw_ids, uppercase=False)
+    duplicate_ids = [k for k, v in counter.items() if v > 1]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("input_count", len(cleaned))
+    c2.metric("unique_count", len(dedup_ids))
+    c3.metric("duplicate_count", len(cleaned) - len(dedup_ids))
+
+    if duplicate_ids:
+        with st.expander("重复 Tracking IDs"):
+            st.write(duplicate_ids)
+
+    st.subheader("C) Fetch / Export（先拉取所有输入运单，再按 日期/仓库/DSP 筛选输出）")
+
     if "result_df" not in st.session_state:
         st.session_state["result_df"] = None
-    if "report_df" not in st.session_state:
-        st.session_state["report_df"] = None
+    if "filtered_df" not in st.session_state:
+        st.session_state["filtered_df"] = None
     if "failures" not in st.session_state:
         st.session_state["failures"] = []
 
-    st.subheader("1) 过滤条件")
-    c1, c2, c3 = st.columns(3)
-    start = c1.date_input("Start date（可空）", value=None)
-    end = c2.date_input("End date（可空）", value=None)
-    name_contains = c3.text_input("Route name contains（可空）", value="")
-
-    st.subheader("2) 参考表（仓库/司机）")
-    b1, b2 = st.columns(2)
-    if b1.button("刷新仓库列表"):
-        with requests.Session() as session:
-            try:
-                st.session_state["warehouses"] = fetch_warehouses(session)
-                st.success(f"仓库数量：{len(st.session_state['warehouses'])}")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"刷新仓库失败：{e}")
-
-    if b2.button("刷新司机列表"):
-        with requests.Session() as session:
-            try:
-                st.session_state["assignees"] = fetch_assignees(session)
-                st.success(f"司机数量：{len(st.session_state['assignees'])}")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"刷新司机失败：{e}")
-
-    wh_by_id: dict[str, dict[str, Any]] = st.session_state.get("warehouses", {})
-    warehouse_ids = sorted([k for k in wh_by_id.keys() if k])
-    warehouse_filter = st.selectbox("Warehouse（可选）", options=[""] + warehouse_ids, index=0)
-
-    st.subheader("3) Fetch / Export")
-    if st.button("Fetch / Export", type="primary"):
+    if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
+        rows_by_id: dict[str, dict[str, str]] = {}
         failures: list[dict[str, str]] = []
+
         progress = st.progress(0)
         status = st.empty()
 
-        csv_extra_buids = _parse_csv_extra_buids(BEANS_ACCOUNT_BUIDS)
-
         with requests.Session() as session:
-            # Use cached reference tables if present; if empty, try fetch once.
-            if not wh_by_id:
-                status.text("Fetching warehouses ...")
+            total = len(dedup_ids)
+            for idx, tracking_id in enumerate(dedup_ids, start=1):
+                status.text(f"处理中：{idx}/{total} - {tracking_id}")
                 try:
-                    wh_by_id = fetch_warehouses(session)
-                    st.session_state["warehouses"] = wh_by_id
-                except Exception as e:  # noqa: BLE001
-                    wh_by_id = {}
-                    failures.append({
-                        "step": "warehouses",
-                        "reason": f"{_humanize_error(e)}；且回退 routes 也失败",
-                    })
+                    payload = fetch_tracking_data(tracking_id, session)
+                    rows_by_id[tracking_id] = build_row(tracking_id, payload, route_index)
+                except requests.HTTPError as e:
+                    code = e.response.status_code if e.response is not None else "N/A"
+                    failures.append({"tracking_id": tracking_id, "reason": f"HTTP {code}"})
+                    rows_by_id[tracking_id] = empty_row(tracking_id)
+                except Exception as e:
+                    failures.append({"tracking_id": tracking_id, "reason": str(e)})
+                    rows_by_id[tracking_id] = empty_row(tracking_id)
 
-            asg_by_id: dict[str, dict[str, Any]] = st.session_state.get("assignees", {})
-            if not asg_by_id:
-                status.text("Fetching assignees ...")
-                try:
-                    asg_by_id = fetch_assignees(session)
-                    st.session_state["assignees"] = asg_by_id
-                except Exception as e:  # noqa: BLE001
-                    asg_by_id = {}
-                    failures.append({
-                        "step": "assignees",
-                        "reason": f"{_humanize_error(e)}；且回退 routes 也失败",
-                    })
+                progress.progress(idx / total)
 
-            status.text("Fetching routes ...")
-            try:
-                routes = fetch_routes(session, start_date=start, end_date=end)
-            except Exception as e:  # noqa: BLE001
-                routes = []
-                failures.append({"step": "routes", "reason": _humanize_error(e)})
+        ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
+        result_df = pd.DataFrame(ordered_rows, columns=OUTPUT_COLUMNS)
 
-            status.text("Fetching routes_metrics ...")
-            try:
-                metrics_by_route = fetch_routes_metrics(session, csv_extra_buids=csv_extra_buids)
-            except Exception as e:  # noqa: BLE001
-                metrics_by_route = {}
-                failures.append({"step": "routes_metrics", "reason": _humanize_error(e)})
-
-            status.text("Assembling rows ...")
-            rows = build_rows(
-                routes=routes,
-                metrics_by_route=metrics_by_route,
-                wh_by_id=wh_by_id,
-                asg_by_id=asg_by_id,
-                start_date=start,
-                end_date=end,
-                warehouse_filter=warehouse_filter,
-                name_contains=name_contains,
-            )
-
-            progress.progress(1.0)
-
-        df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
-        st.session_state["result_df"] = df
-        st.session_state["failures"] = failures
-        status.text("Done")
-
-    st.subheader("4) Routes Report (items/do/report)")
-    r1, r2, r3 = st.columns(3)
-    report_from = r1.date_input("Report from date", value=date.today(), key="report_from")
-    report_to = r2.date_input("Report to date", value=date.today(), key="report_to")
-    report_route_name = r3.text_input("Report route_name（可空）", value="")
-    rr1, rr2, rr3 = st.columns(3)
-    report_address = rr1.text_input("Report address（可空）", value="")
-    report_package_number = rr2.text_input("Report package_number（可空）", value="")
-    report_assignee_name = rr3.text_input("Report assignee_name（可空）", value="")
-
-    if st.button("Fetch Routes Report"):
-        if report_from > report_to:
-            st.error("Report from date 不能大于 to date")
-        else:
-            with requests.Session() as session:
-                try:
-                    report_items = fetch_routes_report(
-                        session=session,
-                        from_date=report_from,
-                        to_date=report_to,
-                        route_name=report_route_name,
-                        address=report_address,
-                        package_number=report_package_number,
-                        assignee_name=report_assignee_name,
-                    )
-                    report_rows = build_report_rows(report_items)
-                    st.session_state["report_df"] = pd.DataFrame(report_rows, columns=REPORT_COLUMNS)
-                    st.success(f"Routes Report 获取成功：{len(report_rows)} 条")
-                except Exception as e:  # noqa: BLE001
-                    st.session_state["report_df"] = None
-                    st.error(f"Routes Report 获取失败：{_humanize_error(e)}")
-
-    failures = st.session_state.get("failures", [])
-    df: pd.DataFrame | None = st.session_state.get("result_df")
-
-    if failures:
-        st.warning("有步骤失败（但仍可能导出部分数据）")
-        st.dataframe(pd.DataFrame(failures), use_container_width=True)
-
-    if df is not None:
-        st.subheader("结果预览")
-        st.dataframe(df.head(100), use_container_width=True)
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_data = df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("下载 CSV", data=csv_data, file_name=f"routes_ops_{stamp}.csv", mime="text/csv")
-
-        try:
-            xlsx_data = _to_excel_bytes(df)
-            st.download_button(
-                "下载 Excel",
-                data=xlsx_data,
-                file_name=f"routes_ops_{stamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        except Exception:
-            st.info("当前环境未能生成 Excel（已提供 CSV）。")
-
-    report_df: pd.DataFrame | None = st.session_state.get("report_df")
-    if report_df is not None:
-        st.subheader("Routes Report 预览")
-        st.dataframe(report_df.head(100), use_container_width=True)
-
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_csv_data = report_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "下载 Routes Report CSV",
-            data=report_csv_data,
-            file_name=f"routes_report_{stamp}.csv",
-            mime="text/csv",
+        # Apply filters AFTER fetching
+        filtered_df = apply_filters(
+            result_df,
+            date_str=picked_date,
+            warehouse_id=picked_wh,
+            dsp_name=picked_dsp,
+            include_unknown=include_unknown,
         )
 
-        try:
-            report_xlsx_data = _to_excel_bytes(report_df)
+        st.session_state["result_df"] = result_df
+        st.session_state["filtered_df"] = filtered_df
+        st.session_state["failures"] = failures
+
+        status.text("处理完成")
+
+    result_df: pd.DataFrame | None = st.session_state.get("result_df")
+    filtered_df: pd.DataFrame | None = st.session_state.get("filtered_df")
+    failures: list[dict[str, str]] = st.session_state.get("failures", [])
+
+    if result_df is not None and filtered_df is not None:
+        st.subheader("D) 结果统计")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("拉取总数", len(result_df))
+        s2.metric("筛选后条目数", len(filtered_df))
+        s3.metric("失败数量", len(failures))
+
+        if failures:
+            st.error("以下 tracking_id 请求失败")
+            fail_df = pd.DataFrame(failures)
+            st.dataframe(fail_df, use_container_width=True)
             st.download_button(
-                "下载 Routes Report Excel",
-                data=report_xlsx_data,
-                file_name=f"routes_report_{stamp}.xlsx",
+                "下载失败列表 CSV",
+                data=fail_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+            )
+
+        st.subheader("E) 筛选结果预览")
+        st.dataframe(filtered_df.head(100), use_container_width=True)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S')")
+        csv_data = filtered_df.to_csv(index=False).encode("utf-8-sig")
+
+        xlsx_data = None
+        try:
+            xlsx_data = df_to_excel_bytes(filtered_df)
+        except Exception:
+            st.warning("当前环境缺少 Excel 依赖，已提供 CSV 下载。")
+
+        c_csv, c_xlsx = st.columns(2)
+        c_csv.download_button(
+            "下载 CSV（筛选后）",
+            data=csv_data,
+            file_name=f"export_filtered_{stamp}.csv",
+            mime="text/csv",
+        )
+        if xlsx_data is not None:
+            c_xlsx.download_button(
+                "下载 Excel（筛选后）",
+                data=xlsx_data,
+                file_name=f"export_filtered_{stamp}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-        except Exception:
-            st.info("当前环境未能生成 Routes Report Excel（已提供 CSV）。")
+
+        with st.expander("查看未筛选的全量结果（调试用）"):
+            st.dataframe(result_df.head(100), use_container_width=True)
+
+        with st.expander("说明：筛选依据"):
+            st.write(
+                "- 这里的 日期/仓库/DSP 筛选是通过运单 status_logs 里解析到的 route_no（success_route/failed_route）"
+                " 再去 routes 列表做 routeNo -> (dateStr, warehouseId, dspName, driverName) 的映射。\n"
+                "- 如果某些运单无法解析 route 或 routes 列表里没有该 routeNo，会导致 dateStr/warehouseId/dspName 为空。\n"
+                "- 你可以用“保留无路由信息的运单”决定是否让这些空值运单也出现在筛选结果里。"
+            )
 
 
 if __name__ == "__main__":
