@@ -200,11 +200,22 @@ def _compute_planned_actual(stop_metrics: list[dict[str, Any]] | None, metric_ty
     planned = 0
     actual = 0
     for x in stop_metrics or []:
-        if _safe_str(x.get("type")).lower() != metric_type.lower():
+        metric_kind = _safe_str(x.get("type") or x.get("metricType") or x.get("stopType")).lower()
+        if metric_kind != metric_type.lower():
             continue
-        pc = int(x.get("packageCount") or x.get("count") or 0)
+        pc = int(x.get("packageCount") or x.get("count") or x.get("plannedCount") or 0)
         planned += pc
-        if _safe_str(x.get("status")).lower() in {"finished", "success", "succeeded", "completed"}:
+        actual_raw = x.get("actualCount")
+        if actual_raw is not None:
+            actual += int(actual_raw or 0)
+            continue
+
+        if _safe_str(x.get("status") or x.get("metricStatus")).lower() in {
+            "finished",
+            "success",
+            "succeeded",
+            "completed",
+        }:
             actual += pc
     return planned, actual
 
@@ -213,10 +224,10 @@ def _compute_failed_count(stop_metrics: list[dict[str, Any]] | None) -> int:
     total = 0
     failed_types = {"failed", "fail", "attempted", "attempt"}
     for x in stop_metrics or []:
-        tp = _safe_str(x.get("type")).lower()
-        status = _safe_str(x.get("status")).lower()
+        tp = _safe_str(x.get("type") or x.get("metricType") or x.get("stopType")).lower()
+        status = _safe_str(x.get("status") or x.get("metricStatus")).lower()
         if tp in failed_types or status in failed_types:
-            total += int(x.get("packageCount") or x.get("count") or 0)
+            total += int(x.get("packageCount") or x.get("count") or x.get("plannedCount") or 0)
     return total
 
 
@@ -265,13 +276,58 @@ def fetch_routes(
     }
     if start_date:
         sd = start_date.strftime("%Y-%m-%d")
-        params.update({"startDate": sd, "dateFrom": sd, "fromDate": sd})
+        params.update(
+            {
+                "startDate": sd,
+                "dateFrom": sd,
+                "fromDate": sd,
+                "routeDateFrom": sd,
+            }
+        )
     if end_date:
         ed = end_date.strftime("%Y-%m-%d")
-        params.update({"endDate": ed, "dateTo": ed, "toDate": ed})
+        params.update(
+            {
+                "endDate": ed,
+                "dateTo": ed,
+                "toDate": ed,
+                "routeDateTo": ed,
+            }
+        )
 
-    payload = _get_json(session, "routes", params=params)
-    return payload.get("route") or payload.get("routes") or []
+    # Some tenants return only recent items unless pagination params are provided.
+    # We request pages and merge unique routes by listRouteId.
+    page_size = 500
+    all_routes: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for page in range(1, 51):
+        paged_params = {
+            **params,
+            "page": page,
+            "pageSize": page_size,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        payload = _get_json(session, "routes", params=paged_params)
+        items = payload.get("route") or payload.get("routes") or []
+        if not items:
+            break
+
+        appended = 0
+        for r in items:
+            rid = _safe_str(r.get("listRouteId"))
+            key = rid or _safe_str(r.get("name"))
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            all_routes.append(r)
+            appended += 1
+
+        if appended == 0 or len(items) < page_size:
+            break
+
+    return all_routes
 
 
 def _extract_reference_from_routes(
@@ -334,9 +390,12 @@ def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dic
 
     out: dict[str, dict[str, Any]] = {}
     for m in items:
-        rid = m.get("listRouteId")
+        rid = _safe_str(m.get("listRouteId") or m.get("routeId") or m.get("id"))
+        route_code = _safe_str(m.get("routeCode") or m.get("name"))
         if rid:
             out[rid] = m
+        if route_code:
+            out[route_code] = m
     return out
 
 
@@ -384,8 +443,14 @@ def build_rows(
         dsp = _extract_dsp(route_code)
         dsp_driver = "-".join([x for x in [dsp, driver] if x])
 
-        m = metrics_by_route.get(route_id or "", {})
-        stop_metrics = m.get("stopMetrics") or []
+        m = metrics_by_route.get(_safe_str(route_id), {}) or metrics_by_route.get(route_code, {})
+        stop_metrics = (
+            m.get("stopMetrics")
+            or m.get("metrics")
+            or m.get("routeMetrics")
+            or m.get("stopLevelMetrics")
+            or []
+        )
         d_plan, d_act = _compute_planned_actual(stop_metrics, "dropoff")
         if d_plan == 0 and d_act == 0:
             d_plan, d_act = _compute_planned_actual(stop_metrics, "delivery")
@@ -563,3 +628,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
