@@ -22,6 +22,9 @@ API_TIMEOUT_SECONDS = int(os.getenv("BEANS_TIMEOUT_SECONDS", "30"))
 # 3) Cookie session: export BEANS_COOKIE="_session_id=...; other_cookie=..."
 BEANS_BASIC_AUTH = os.getenv("BEANS_BASIC_AUTH", "")
 BEANS_TOKEN = os.getenv("BEANS_TOKEN", "")
+# Backward-compatible aliases used by earlier internal scripts.
+KPI_API_TOKEN = os.getenv("KPI_API_TOKEN", "")
+KPI_API_BASIC_AUTH = os.getenv("KPI_API_BASIC_AUTH", "")
 BEANS_COOKIE = os.getenv("BEANS_COOKIE", "")
 
 # Account buid list for routes_metrics (comma separated)
@@ -45,15 +48,22 @@ OUTPUT_COLUMNS = [
 # -----------------------------
 # Helpers
 # -----------------------------
-def _headers() -> dict[str, str]:
+def _headers() -> dict[str, str]:␊
     h = {
         "Accept": "application/json",
         "User-Agent": "Fimile-Routes-Export/1.0",
     }
-    if BEANS_BASIC_AUTH:
-        h["Authorization"] = BEANS_BASIC_AUTH
-    if BEANS_TOKEN:
-        h["Authorization"] = f"Bearer {BEANS_TOKEN}"
+    auth_header = (
+        BEANS_BASIC_AUTH.strip()
+        or KPI_API_BASIC_AUTH.strip()
+        or BEANS_TOKEN.strip()
+        or KPI_API_TOKEN.strip()
+    )
+    if auth_header:
+        if auth_header.lower().startswith(("basic ", "bearer ")):
+            h["Authorization"] = auth_header
+        else:
+            h["Authorization"] = f"Bearer {auth_header}"
     if BEANS_COOKIE:
         h["Cookie"] = BEANS_COOKIE
     return h
@@ -435,5 +445,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
