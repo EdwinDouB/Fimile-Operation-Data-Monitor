@@ -157,16 +157,51 @@ def fetch_routes(session: requests.Session) -> list[dict[str, Any]]:
     return payload.get("route") or payload.get("routes") or []
 
 
+def _extract_reference_from_routes(
+    routes: list[dict[str, Any]], key: str, id_key: str
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for r in routes:
+        ref = r.get(key) or {}
+        if not isinstance(ref, dict):
+            continue
+        ref_id = ref.get(id_key)
+        if not ref_id:
+            continue
+        current = out.get(ref_id, {})
+        merged = {**current, **ref}
+        out[ref_id] = merged
+    return out
+
+
 def fetch_warehouses(session: requests.Session) -> dict[str, dict[str, Any]]:
-    payload = _get_json(session, "warehouses", params={"updatedAfter": 0})
-    items = payload.get("warehouse") or payload.get("warehouses") or []
-    return {w.get("listWarehouseId"): w for w in items if w.get("listWarehouseId")}
+    try:
+        payload = _get_json(session, "warehouses", params={"updatedAfter": 0})
+        items = payload.get("warehouse") or payload.get("warehouses") or []
+        return {w.get("listWarehouseId"): w for w in items if w.get("listWarehouseId")}
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        # Some accounts are forbidden to read /warehouses directly.
+        # Fall back to route payload, which usually embeds warehouse info.
+        if status in {401, 403, 404}:
+            routes = fetch_routes(session)
+            return _extract_reference_from_routes(routes, key="warehouse", id_key="listWarehouseId")
+        raise
 
 
 def fetch_assignees(session: requests.Session) -> dict[str, dict[str, Any]]:
-    payload = _get_json(session, "assignees", params={"updatedAfter": 0})
-    items = payload.get("assignee") or payload.get("assignees") or []
-    return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
+    try:
+        payload = _get_json(session, "assignees", params={"updatedAfter": 0})
+        items = payload.get("assignee") or payload.get("assignees") or []
+        return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        # Some accounts are forbidden to read /assignees directly.
+        # Fall back to route payload, which usually embeds assignee info.
+        if status in {401, 403, 404}:
+            routes = fetch_routes(session)
+            return _extract_reference_from_routes(routes, key="assignee", id_key="listAssigneeId")
+        raise
 
 
 def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dict[str, dict[str, Any]]:
@@ -400,4 +435,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
