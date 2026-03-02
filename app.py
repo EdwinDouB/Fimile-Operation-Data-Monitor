@@ -169,6 +169,24 @@ def fetch_assignees(session: requests.Session) -> dict[str, dict[str, Any]]:
     return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
 
 
+def fetch_warehouses_from_routes(session: requests.Session) -> dict[str, dict[str, Any]]:
+    """Fallback: derive warehouse options from routes payload when warehouses API is forbidden."""
+    routes = fetch_routes(session)
+    out: dict[str, dict[str, Any]] = {}
+    for r in routes:
+        wh = r.get("warehouse") or {}
+        wh_id = wh.get("listWarehouseId")
+        if not wh_id:
+            continue
+        out[wh_id] = {
+            "listWarehouseId": wh_id,
+            "name": wh.get("name") or "",
+            "formattedAddress": wh.get("formattedAddress") or wh.get("address") or "",
+            "address": wh.get("address") or "",
+        }
+    return out
+
+
 def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dict[str, dict[str, Any]]:
     params: dict[str, Any] = {}
     if csv_extra_buids:
@@ -400,5 +418,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
