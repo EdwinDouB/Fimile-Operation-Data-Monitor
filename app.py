@@ -56,7 +56,7 @@ def _headers() -> dict[str, str]:
         h["Authorization"] = f"Bearer {BEANS_TOKEN}"
     if BEANS_COOKIE:
         h["Cookie"] = BEANS_COOKIE
-    return h
+    return h h
 
 
 def _get_json(session: requests.Session, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -169,30 +169,6 @@ def fetch_assignees(session: requests.Session) -> dict[str, dict[str, Any]]:
     return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
 
 
-def fetch_warehouses_from_routes(session: requests.Session) -> dict[str, dict[str, Any]]:
-    """Fallback: derive warehouse options from routes payload when warehouses API is forbidden."""
-    routes = fetch_routes(session)
-    out: dict[str, dict[str, Any]] = {}
-    for r in routes:
-        wh = r.get("warehouse") or {}
-        wh_id = wh.get("listWarehouseId")
-        if not wh_id:
-            continue
-        out[wh_id] = {
-            "listWarehouseId": wh_id,
-            "name": wh.get("name") or "",
-            "formattedAddress": wh.get("formattedAddress") or wh.get("address") or "",
-            "address": wh.get("address") or "",
-        }
-    return out
-
-
-def _is_403_error(err: Exception) -> bool:
-    if isinstance(err, requests.HTTPError) and err.response is not None:
-        return err.response.status_code == 403
-    return "403" in str(err)
-
-
 def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dict[str, dict[str, Any]]:
     params: dict[str, Any] = {}
     if csv_extra_buids:
@@ -216,6 +192,78 @@ def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dic
 # Assembly
 # -----------------------------
 def build_rows(
+    routes: list[dict[str, Any]],
+    metrics_by_route: dict[str, dict[str, Any]],
+    wh_by_id: dict[str, dict[str, Any]],
+    asg_by_id: dict[str, dict[str, Any]],
+    start_date: date | None,
+    end_date: date | None,
+    warehouse_filter: str,
+    name_contains: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    name_contains_lc = (name_contains or "").strip().lower()
+
+    for r in routes:
+        route_id = r.get("listRouteId")
+        route_code = _safe_str(r.get("name"))
+
+        ds = _parse_date(r)
+        if not _date_in_range(ds, start_date, end_date):
+            continue
+
+        wh_id = (r.get("warehouse") or {}).get("listWarehouseId") or ""
+        if warehouse_filter and wh_id != warehouse_filter:
+            continue
+
+        if name_contains_lc and name_contains_lc not in route_code.lower():
+            continue
+
+        start_addr = ""
+        if wh_id and wh_id in wh_by_id:
+            w = wh_by_id[wh_id]
+            start_addr = _safe_str(w.get("formattedAddress") or w.get("address") or w.get("name") or "")
+
+        asg_id = (r.get("assignee") or {}).get("listAssigneeId") or ""
+        driver = ""
+        if asg_id and asg_id in asg_by_id:
+            driver = _safe_str(asg_by_id[asg_id].get("name") or "")
+
+        dsp = _extract_dsp(route_code)
+        dsp_driver = "-".join([x for x in [dsp, driver] if x])
+
+        m = metrics_by_route.get(route_id or "", {})
+        stop_metrics = m.get("stopMetrics") or []
+        d_plan, d_act = _compute_planned_actual(stop_metrics, "dropoff")
+        p_plan, p_act = _compute_planned_actual(stop_metrics, "pickup")
+
+        rows.append(
+            {
+                "route_code": route_code,
+                "date": ds,
+                "start_address": start_addr,
+                "dsp": dsp,
+                "driver": driver,
+                "dsp_driver": dsp_driver,
+                "delivery_count": f"{d_plan}/{d_act}",
+                "pickup_count": f"{p_plan}/{p_act}",
+                "listRouteId": _safe_str(route_id),
+                "listWarehouseId": _safe_str(wh_id),
+                "listAssigneeId": _safe_str(asg_id),
+            }
+        )
+    return rows
+
+
+# -----------------------------
+# Streamlit App
+# -----------------------------
+def main() -> None:
+    st.set_page_config(page_title="Routes Ops Export", layout="wide")
+    st.title("Routes Ops Export")
+
+    with st.expander("运行前准备（鉴权放环境变量）"):
+        st.markdown(
             """
 - Bearer：`BEANS_TOKEN`
 - Cookie：`BEANS_COOKIE`（例如 `_session_id=...`）
@@ -247,15 +295,7 @@ def build_rows(
                 st.session_state["warehouses"] = fetch_warehouses(session)
                 st.success(f"仓库数量：{len(st.session_state['warehouses'])}")
             except Exception as e:  # noqa: BLE001
-                if _is_403_error(e):
-                    try:
-                        st.session_state["warehouses"] = fetch_warehouses_from_routes(session)
-                        st.warning("warehouses 接口无权限，已改用 routes 数据推导仓库列表。")
-                        st.success(f"仓库数量：{len(st.session_state['warehouses'])}")
-                    except Exception as fallback_e:  # noqa: BLE001
-                        st.error(f"刷新仓库失败：{e}；回退 routes 也失败：{fallback_e}")
-                else:
-                    st.error(f"刷新仓库失败：{e}")
+                st.error(f"刷新仓库失败：{e}")
 
     if b2.button("刷新司机列表"):
         with requests.Session() as session:
@@ -285,22 +325,8 @@ def build_rows(
                     wh_by_id = fetch_warehouses(session)
                     st.session_state["warehouses"] = wh_by_id
                 except Exception as e:  # noqa: BLE001
-                    if _is_403_error(e):
-                        try:
-                            wh_by_id = fetch_warehouses_from_routes(session)
-                            st.session_state["warehouses"] = wh_by_id
-                            failures.append(
-                                {
-                                    "step": "warehouses",
-                                    "reason": "warehouses 接口 403，已自动回退为 routes 推导仓库列表",
-                                }
-                            )
-                        except Exception as fallback_e:  # noqa: BLE001
-                            wh_by_id = {}
-                            failures.append({"step": "warehouses", "reason": f"{e}; fallback failed: {fallback_e}"})
-                    else:
-                        wh_by_id = {}
-                        failures.append({"step": "warehouses", "reason": str(e)})
+                    wh_by_id = {}
+                    failures.append({"step": "warehouses", "reason": str(e)})
 
             asg_by_id: dict[str, dict[str, Any]] = st.session_state.get("assignees", {})
             if not asg_by_id:
@@ -374,10 +400,3 @@ def build_rows(
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
