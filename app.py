@@ -1,298 +1,398 @@
+import io
+import os
+import re
+from datetime import datetime, date
+from typing import Any
+
 import pandas as pd
-import pymysql
+import requests
 import streamlit as st
 
 
-def get_conn():
-    host = st.secrets.get("MYSQL_HOST", "")
-    port = int(st.secrets.get("MYSQL_PORT", 3306))
-    user = st.secrets.get("MYSQL_USERNAME", "")
-    password = st.secrets.get("MYSQL_PASSWORD", "")
-    db = st.secrets.get("MYSQL_DATABASE", "")
+# -----------------------------
+# Config (prefer env vars)
+# -----------------------------
+BASE_URL = os.getenv("BEANS_BASE_URL", "https://isp.beans.ai/enterprise/v1/lists")
+API_TIMEOUT_SECONDS = int(os.getenv("BEANS_TIMEOUT_SECONDS", "30"))
 
-    ssl = None
-    if st.secrets.get("MYSQL_SSL", "false").lower() == "true":
-        ssl = {}
+# Use ONE of these auth methods:
+# 1) Bearer token: export BEANS_TOKEN="..."
+# 2) Cookie session: export BEANS_COOKIE="_session_id=...; other_cookie=..."
+BEANS_TOKEN = os.getenv("BEANS_TOKEN", "")
+BEANS_COOKIE = os.getenv("BEANS_COOKIE", "")
 
-    return pymysql.connect(
-        host=host,
-        port=port,
-        user=user,
-        password=password,
-        database=db,
-        ssl=ssl,
-        cursorclass=pymysql.cursors.DictCursor,
-        connect_timeout=10,
-        read_timeout=30,
-        write_timeout=30,
-        autocommit=True,
-    )
+# Account buid list for routes_metrics (comma separated)
+# Example: export BEANS_ACCOUNT_BUIDS="2c1e8ad1e59945579fa2a992e93932d6"
+BEANS_ACCOUNT_BUIDS = os.getenv("BEANS_ACCOUNT_BUIDS", "")
 
-
-def query_df(sql: str, params=None) -> pd.DataFrame:
-    try:
-        conn = get_conn()
-    except Exception as e:
-        code = getattr(e, "args", [None])[0]
-        st.error(f"MySQL 连接失败。错误码={code}（去 Streamlit Cloud logs 看原始错误原因）")
-        raise
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params or ())
-            rows = cur.fetchall()
-        return pd.DataFrame(rows)
-    finally:
-        conn.close()
+OUTPUT_COLUMNS = [
+    "route_code",
+    "date",
+    "start_address",
+    "dsp",
+    "driver",
+    "dsp_driver",
+    "delivery_count",
+    "pickup_count",
+    "listRouteId",
+    "listWarehouseId",
+    "listAssigneeId",
+]
 
 
-def safe_ident(name: str) -> str:
-    if not name or any(c in name for c in [" ", ";", "--", "/*", "*/", "`", '"', "'"]):
-        raise ValueError(f"非法标识符: {name}")
-    return name
+# -----------------------------
+# Helpers
+# -----------------------------
+def _headers() -> dict[str, str]:
+    h = {
+        "Accept": "application/json",
+        "User-Agent": "Fimile-Routes-Export/1.0",
+    }
+    if BEANS_TOKEN:
+        h["Authorization"] = f"Bearer {BEANS_TOKEN}"
+    if BEANS_COOKIE:
+        h["Cookie"] = BEANS_COOKIE
+    return h
 
 
-def list_tables(schema: str) -> list[str]:
-    sql = """
-    SELECT TABLE_NAME
-    FROM information_schema.tables
-    WHERE table_schema = %s
-    ORDER BY TABLE_NAME
+def _get_json(session: requests.Session, path: str, params: dict[str, Any] | None = None) -> Any:
+    url = f"{BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    r = session.get(url, headers=_headers(), params=params, timeout=API_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.json()
+
+
+def _safe_str(x: Any) -> str:
+    return "" if x is None else str(x)
+
+
+def _extract_dsp(route_name: str) -> str:
     """
-    df = query_df(sql, (schema,))
-    if df.empty:
-        return []
-    return df["TABLE_NAME"].tolist()
-
-
-def list_columns(schema: str, TABLE_NAME: str) -> list[str]:
-    sql = """
-    SELECT COLUMN_NAME
-    FROM information_schema.columns
-    WHERE table_schema = %s AND TABLE_NAME = %s
-    ORDER BY ordinal_position
+    Infer DSP code from route name.
+    Examples:
+      - "CA-IE01-02/28-DX-ALEX" -> "DX"
+      - "TX-0227 - 1 - CBC-Andres" -> "CBC"
     """
-    df = query_df(sql, (schema, TABLE_NAME))
-    if df.empty:
-        return []
-    return df["COLUMN_NAME"].tolist()
+    s = route_name.strip()
+
+    # Pattern like "...-DX-ALEX" at end
+    m = re.search(r"-([A-Z]{2,6})-[A-Z0-9]+$", s)
+    if m:
+        return m.group(1)
+
+    # Pattern like "... CBC-Andres"
+    m = re.search(r"\b([A-Z]{2,6})-[A-Za-z]", s)
+    if m:
+        return m.group(1)
+
+    return ""
 
 
-def maybe_pick(default: str, options: list[str]) -> str:
-    return default if default in options else options[0]
+def _parse_date(route: dict[str, Any]) -> str:
+    ds = route.get("dateStr")
+    if ds:
+        return _safe_str(ds)
+
+    name = _safe_str(route.get("name"))
+    m = re.search(r"(\d{2})/(\d{2})", name)
+    if m:
+        mm = int(m.group(1))
+        dd = int(m.group(2))
+        year = int(os.getenv("BEANS_DEFAULT_YEAR", str(datetime.now().year)))
+        return f"{year:04d}-{mm:02d}-{dd:02d}"
+    return ""
 
 
-def build_and_run_ofd_report(
-    schema: str,
-    TABLE_NAME: str,
-    selected_date,
-    package_col: str,
-    status_col: str,
-    time_col: str,
-    region_col: str,
-    hub_col: str,
-    dsp_col: str,
-    driver_col: str,
-    bad_pod_col: str | None,
-    ofd_keyword: str,
-    failed_keyword: str,
-    success_keywords: list[str],
-) -> pd.DataFrame:
-    schema_i = safe_ident(schema)
-    table_i = safe_ident(TABLE_NAME)
-
-    package_i = safe_ident(package_col)
-    status_i = safe_ident(status_col)
-    time_i = safe_ident(time_col)
-    region_i = safe_ident(region_col)
-    hub_i = safe_ident(hub_col)
-    dsp_i = safe_ident(dsp_col)
-    driver_i = safe_ident(driver_col)
-
-    bad_pod_sql = "0 AS bad_pod"
-    if bad_pod_col and bad_pod_col != "(None)":
-        bad_pod_i = safe_ident(bad_pod_col)
-        bad_pod_sql = f"COALESCE(t.`{bad_pod_i}`, 0) AS bad_pod"
-
-    success_clause = " OR ".join(["LOWER(t2.`" + status_i + "`) LIKE %s" for _ in success_keywords])
-
-    sql = f"""
-    WITH ofd AS (
-        SELECT
-            t.`{package_i}` AS package_id,
-            t.`{region_i}` AS region,
-            t.`{hub_i}` AS hub,
-            t.`{dsp_i}` AS dsp,
-            t.`{driver_i}` AS driver_name,
-            {bad_pod_sql},
-            MIN(t.`{time_i}`) AS ofd_time
-        FROM `{schema_i}`.`{table_i}` t
-        WHERE DATE(t.`{time_i}`) = %s
-          AND LOWER(t.`{status_i}`) LIKE %s
-        GROUP BY
-            t.`{package_i}`,
-            t.`{region_i}`,
-            t.`{hub_i}`,
-            t.`{dsp_i}`,
-            t.`{driver_i}`,
-            bad_pod
-    ),
-    classified AS (
-        SELECT
-            o.*,
-            MAX(
-                CASE
-                    WHEN LOWER(t2.`{status_i}`) LIKE %s
-                     AND t2.`{time_i}` >= o.ofd_time
-                     AND t2.`{time_i}` <= DATE_ADD(o.ofd_time, INTERVAL 24 HOUR)
-                    THEN 1 ELSE 0
-                END
-            ) AS has_failed,
-            MAX(
-                CASE
-                    WHEN ({success_clause})
-                     AND t2.`{time_i}` >= o.ofd_time
-                     AND t2.`{time_i}` <= DATE_ADD(o.ofd_time, INTERVAL 24 HOUR)
-                    THEN 1 ELSE 0
-                END
-            ) AS has_success
-        FROM ofd o
-        LEFT JOIN `{schema_i}`.`{table_i}` t2
-          ON t2.`{package_i}` = o.package_id
-        GROUP BY
-            o.package_id,
-            o.region,
-            o.hub,
-            o.dsp,
-            o.driver_name,
-            o.bad_pod,
-            o.ofd_time
-    )
-    SELECT
-        DATE(%s) AS `Date`,
-        region AS Region,
-        hub AS Hub,
-        dsp AS DSP,
-        driver_name AS Driver_Name,
-        COUNT(*) AS total_packages,
-        SUM(CASE WHEN has_failed = 0 AND has_success = 1 THEN 1 ELSE 0 END) AS total_successful,
-        SUM(CASE WHEN has_failed = 1 THEN 1 ELSE 0 END) AS total_failed,
-        SUM(CASE WHEN has_failed = 0 AND has_success = 0 THEN 1 ELSE 0 END) AS total_unfinished,
-        SUM(CASE WHEN bad_pod IN (1, '1', 'Y', 'y', 'true', 'TRUE', 'bad', 'BAD') THEN 1 ELSE 0 END) AS bad_POD
-    FROM classified
-    GROUP BY region, hub, dsp, driver_name
-    ORDER BY total_packages DESC, Driver_Name ASC
-    """
-
-    params = [
-        str(selected_date),
-        f"%{ofd_keyword.lower()}%",
-        f"%{failed_keyword.lower()}%",
-    ]
-    params.extend([f"%{k.lower()}%" for k in success_keywords])
-    params.append(str(selected_date))
-
-    return query_df(sql, tuple(params))
+def _compute_planned_actual(stop_metrics: list[dict[str, Any]] | None, metric_type: str) -> tuple[int, int]:
+    planned = 0
+    actual = 0
+    for x in stop_metrics or []:
+        if x.get("type") != metric_type:
+            continue
+        pc = int(x.get("packageCount") or 0)
+        planned += pc
+        if x.get("status") == "finished":
+            actual += pc
+    return planned, actual
 
 
-def main():
-    st.set_page_config(page_title="OFD 24h Outcome Analyzer", layout="wide")
-    st.title("OFD 24小时结果分析")
+def _to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="routes")
+    buf.seek(0)
+    return buf.read()
 
-    default_db = st.secrets.get("MYSQL_DATABASE", "")
-    st.caption(f"当前默认数据库：{default_db}")
 
-    schema = st.text_input("Schema / Database", value=default_db)
-    if not schema:
-        st.warning("请先输入数据库名。")
-        st.stop()
+def _parse_csv_extra_buids(raw: str) -> str:
+    items = [x.strip() for x in (raw or "").split(",") if x.strip()]
+    return ",".join(items)
 
+
+def _date_in_range(ds: str, start: date | None, end: date | None) -> bool:
+    if not (start or end):
+        return True
+    if not ds:
+        return False
     try:
-        tables = list_tables(schema)
-    except Exception as e:
-        st.error(f"读取表列表失败：{e}")
-        st.stop()
+        d = datetime.strptime(ds, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    if start and d < start:
+        return False
+    if end and d > end:
+        return False
+    return True
 
-    if not tables:
-        st.warning("当前 schema 下没有可见的表。")
-        st.stop()
 
-    default_table = "station_delivery_details" if "station_delivery_details" in tables else tables[0]
-    TABLE_NAME = st.selectbox("轨迹/派送事件表", tables, index=tables.index(default_table))
+# -----------------------------
+# Fetchers
+# -----------------------------
+def fetch_routes(session: requests.Session) -> list[dict[str, Any]]:
+    payload = _get_json(session, "routes", params={"updatedAfter": 0, "includeToday": "true"})
+    return payload.get("route") or payload.get("routes") or []
 
-    try:
-        columns = list_columns(schema, TABLE_NAME)
-    except Exception as e:
-        st.error(f"读取字段失败：{e}")
-        st.stop()
 
-    if not columns:
-        st.warning("选中的表没有字段。")
-        st.stop()
+def fetch_warehouses(session: requests.Session) -> dict[str, dict[str, Any]]:
+    payload = _get_json(session, "warehouses", params={"updatedAfter": 0})
+    items = payload.get("warehouse") or payload.get("warehouses") or []
+    return {w.get("listWarehouseId"): w for w in items if w.get("listWarehouseId")}
 
-    st.subheader("1) 规则与字段映射")
-    selected_date = st.date_input("选择日期（查找当天 Out for delivery）")
 
+def fetch_assignees(session: requests.Session) -> dict[str, dict[str, Any]]:
+    payload = _get_json(session, "assignees", params={"updatedAfter": 0})
+    items = payload.get("assignee") or payload.get("assignees") or []
+    return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
+
+
+def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dict[str, dict[str, Any]]:
+    params: dict[str, Any] = {}
+    if csv_extra_buids:
+        params["csvExtraAccountBuidsList"] = csv_extra_buids
+
+    payload = _get_json(session, "routes_metrics", params=params)
+    if isinstance(payload, list):
+        items = payload
+    else:
+        items = payload.get("routesMetrics") or payload.get("routeMetrics") or payload.get("metrics") or []
+
+    out: dict[str, dict[str, Any]] = {}
+    for m in items:
+        rid = m.get("listRouteId")
+        if rid:
+            out[rid] = m
+    return out
+
+
+# -----------------------------
+# Assembly
+# -----------------------------
+def build_rows(
+    routes: list[dict[str, Any]],
+    metrics_by_route: dict[str, dict[str, Any]],
+    wh_by_id: dict[str, dict[str, Any]],
+    asg_by_id: dict[str, dict[str, Any]],
+    start_date: date | None,
+    end_date: date | None,
+    warehouse_filter: str,
+    name_contains: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    name_contains_lc = (name_contains or "").strip().lower()
+
+    for r in routes:
+        route_id = r.get("listRouteId")
+        route_code = _safe_str(r.get("name"))
+
+        ds = _parse_date(r)
+        if not _date_in_range(ds, start_date, end_date):
+            continue
+
+        wh_id = (r.get("warehouse") or {}).get("listWarehouseId") or ""
+        if warehouse_filter and wh_id != warehouse_filter:
+            continue
+
+        if name_contains_lc and name_contains_lc not in route_code.lower():
+            continue
+
+        start_addr = ""
+        if wh_id and wh_id in wh_by_id:
+            w = wh_by_id[wh_id]
+            start_addr = _safe_str(w.get("formattedAddress") or w.get("address") or w.get("name") or "")
+
+        asg_id = (r.get("assignee") or {}).get("listAssigneeId") or ""
+        driver = ""
+        if asg_id and asg_id in asg_by_id:
+            driver = _safe_str(asg_by_id[asg_id].get("name") or "")
+
+        dsp = _extract_dsp(route_code)
+        dsp_driver = "-".join([x for x in [dsp, driver] if x])
+
+        m = metrics_by_route.get(route_id or "", {})
+        stop_metrics = m.get("stopMetrics") or []
+        d_plan, d_act = _compute_planned_actual(stop_metrics, "dropoff")
+        p_plan, p_act = _compute_planned_actual(stop_metrics, "pickup")
+
+        rows.append(
+            {
+                "route_code": route_code,
+                "date": ds,
+                "start_address": start_addr,
+                "dsp": dsp,
+                "driver": driver,
+                "dsp_driver": dsp_driver,
+                "delivery_count": f"{d_plan}/{d_act}",
+                "pickup_count": f"{p_plan}/{p_act}",
+                "listRouteId": _safe_str(route_id),
+                "listWarehouseId": _safe_str(wh_id),
+                "listAssigneeId": _safe_str(asg_id),
+            }
+        )
+    return rows
+
+
+# -----------------------------
+# Streamlit App
+# -----------------------------
+def main() -> None:
+    st.set_page_config(page_title="Routes Ops Export", layout="wide")
+    st.title("Routes Ops Export")
+
+    with st.expander("运行前准备（鉴权放环境变量）"):
+        st.markdown(
+            """
+- Bearer：`BEANS_TOKEN`
+- Cookie：`BEANS_COOKIE`（例如 `_session_id=...`）
+- routes_metrics：`BEANS_ACCOUNT_BUIDS`（逗号分隔）
+            """.strip()
+        )
+
+    # Session state
+    if "warehouses" not in st.session_state:
+        st.session_state["warehouses"] = {}
+    if "assignees" not in st.session_state:
+        st.session_state["assignees"] = {}
+    if "result_df" not in st.session_state:
+        st.session_state["result_df"] = None
+    if "failures" not in st.session_state:
+        st.session_state["failures"] = []
+
+    st.subheader("1) 过滤条件")
     c1, c2, c3 = st.columns(3)
-    with c1:
-        package_col = st.selectbox("包裹唯一ID字段", columns, index=columns.index(maybe_pick("waybill_no", columns)))
-        status_col = st.selectbox("状态字段", columns, index=columns.index(maybe_pick("status", columns)))
-        time_col = st.selectbox("状态时间字段", columns, index=columns.index(maybe_pick("created_at", columns)))
-    with c2:
-        region_col = st.selectbox("Region字段", columns, index=columns.index(maybe_pick("region", columns)))
-        hub_col = st.selectbox("Hub字段", columns, index=columns.index(maybe_pick("hub", columns)))
-        dsp_col = st.selectbox("DSP字段", columns, index=columns.index(maybe_pick("dsp", columns)))
-    with c3:
-        driver_col = st.selectbox("Driver_Name字段", columns, index=columns.index(maybe_pick("driver_name", columns)))
-        bad_pod_options = ["(None)"] + columns
-        bad_pod_col = st.selectbox("bad_POD字段（可选）", bad_pod_options)
+    start = c1.date_input("Start date（可空）", value=None)
+    end = c2.date_input("End date（可空）", value=None)
+    name_contains = c3.text_input("Route name contains（可空）", value="")
 
-    st.subheader("2) 状态关键词")
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        ofd_keyword = st.text_input("Out for delivery 关键词", value="out for delivery")
-    with k2:
-        failed_keyword = st.text_input("Failed 关键词", value="failed")
-    with k3:
-        success_text = st.text_input("Successful 关键词（逗号分隔）", value="successful,delivered")
+    st.subheader("2) 参考表（仓库/司机）")
+    b1, b2 = st.columns(2)
+    if b1.button("刷新仓库列表"):
+        with requests.Session() as session:
+            try:
+                st.session_state["warehouses"] = fetch_warehouses(session)
+                st.success(f"仓库数量：{len(st.session_state['warehouses'])}")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"刷新仓库失败：{e}")
 
-    success_keywords = [x.strip() for x in success_text.split(",") if x.strip()]
-    if not success_keywords:
-        st.error("Successful 关键词不能为空。")
-        st.stop()
+    if b2.button("刷新司机列表"):
+        with requests.Session() as session:
+            try:
+                st.session_state["assignees"] = fetch_assignees(session)
+                st.success(f"司机数量：{len(st.session_state['assignees'])}")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"刷新司机失败：{e}")
 
-    if st.button("生成汇总表", type="primary"):
+    wh_by_id: dict[str, dict[str, Any]] = st.session_state.get("warehouses", {})
+    warehouse_ids = sorted([k for k in wh_by_id.keys() if k])
+    warehouse_filter = st.selectbox("Warehouse（可选）", options=[""] + warehouse_ids, index=0)
+
+    st.subheader("3) Fetch / Export")
+    if st.button("Fetch / Export", type="primary"):
+        failures: list[dict[str, str]] = []
+        progress = st.progress(0)
+        status = st.empty()
+
+        csv_extra_buids = _parse_csv_extra_buids(BEANS_ACCOUNT_BUIDS)
+
+        with requests.Session() as session:
+            # Use cached reference tables if present; if empty, try fetch once.
+            if not wh_by_id:
+                status.text("Fetching warehouses ...")
+                try:
+                    wh_by_id = fetch_warehouses(session)
+                    st.session_state["warehouses"] = wh_by_id
+                except Exception as e:  # noqa: BLE001
+                    wh_by_id = {}
+                    failures.append({"step": "warehouses", "reason": str(e)})
+
+            asg_by_id: dict[str, dict[str, Any]] = st.session_state.get("assignees", {})
+            if not asg_by_id:
+                status.text("Fetching assignees ...")
+                try:
+                    asg_by_id = fetch_assignees(session)
+                    st.session_state["assignees"] = asg_by_id
+                except Exception as e:  # noqa: BLE001
+                    asg_by_id = {}
+                    failures.append({"step": "assignees", "reason": str(e)})
+
+            status.text("Fetching routes ...")
+            try:
+                routes = fetch_routes(session)
+            except Exception as e:  # noqa: BLE001
+                routes = []
+                failures.append({"step": "routes", "reason": str(e)})
+
+            status.text("Fetching routes_metrics ...")
+            try:
+                metrics_by_route = fetch_routes_metrics(session, csv_extra_buids=csv_extra_buids)
+            except Exception as e:  # noqa: BLE001
+                metrics_by_route = {}
+                failures.append({"step": "routes_metrics", "reason": str(e)})
+
+            status.text("Assembling rows ...")
+            rows = build_rows(
+                routes=routes,
+                metrics_by_route=metrics_by_route,
+                wh_by_id=wh_by_id,
+                asg_by_id=asg_by_id,
+                start_date=start,
+                end_date=end,
+                warehouse_filter=warehouse_filter,
+                name_contains=name_contains,
+            )
+
+            progress.progress(1.0)
+
+        df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+        st.session_state["result_df"] = df
+        st.session_state["failures"] = failures
+        status.text("Done")
+
+    failures = st.session_state.get("failures", [])
+    df: pd.DataFrame | None = st.session_state.get("result_df")
+
+    if failures:
+        st.warning("有步骤失败（但仍可能导出部分数据）")
+        st.dataframe(pd.DataFrame(failures), use_container_width=True)
+
+    if df is not None:
+        st.subheader("结果预览")
+        st.dataframe(df.head(100), use_container_width=True)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_data = df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("下载 CSV", data=csv_data, file_name=f"routes_ops_{stamp}.csv", mime="text/csv")
+
         try:
-            result_df = build_and_run_ofd_report(
-                schema=schema,
-                TABLE_NAME=TABLE_NAME,
-                selected_date=selected_date,
-                package_col=package_col,
-                status_col=status_col,
-                time_col=time_col,
-                region_col=region_col,
-                hub_col=hub_col,
-                dsp_col=dsp_col,
-                driver_col=driver_col,
-                bad_pod_col=bad_pod_col if bad_pod_col != "(None)" else None,
-                ofd_keyword=ofd_keyword,
-                failed_keyword=failed_keyword,
-                success_keywords=success_keywords,
-            )
-            st.subheader("结果")
-            st.dataframe(result_df, use_container_width=True, height=500)
+            xlsx_data = _to_excel_bytes(df)
             st.download_button(
-                "下载 CSV",
-                data=result_df.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"ofd_outcome_{selected_date}.csv",
-                mime="text/csv",
+                "下载 Excel",
+                data=xlsx_data,
+                file_name=f"routes_ops_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-        except Exception as e:
-            st.error(f"生成失败：{e}")
+        except Exception:
+            st.info("当前环境未能生成 Excel（已提供 CSV）。")
 
 
 if __name__ == "__main__":
     main()
-
-
-
