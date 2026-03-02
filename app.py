@@ -452,6 +452,8 @@ def main() -> None:
 
     if "dedup_ids" not in st.session_state:
         st.session_state["dedup_ids"] = []
+    if "db_raw_ids" not in st.session_state:
+        st.session_state["db_raw_ids"] = []
     if "result_df" not in st.session_state:
         st.session_state["result_df"] = None
     if "failures" not in st.session_state:
@@ -474,11 +476,16 @@ def main() -> None:
             with st.spinner("查询数据库中..."):
                 try:
                     raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
+                    st.session_state["db_raw_ids"] = raw_ids
                     if not raw_ids:
                         st.warning("该日期范围内未找到任何 tracking_number")
                 except Exception as e:
                     st.error(str(e))
                     raw_ids = []
+                    st.session_state["db_raw_ids"] = []
+
+        if not btn:
+            raw_ids = st.session_state.get("db_raw_ids", [])
 
         if raw_ids:
             with st.expander(f"数据库返回运单号预览（前 50 / 共 {len(raw_ids)}）", expanded=False):
@@ -588,3 +595,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
