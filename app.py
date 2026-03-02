@@ -54,6 +54,55 @@ OUTPUT_COLUMNS = [
 ]
 
 
+def count_pod_stats(row: dict[str, str] | pd.Series) -> tuple[int, int]:
+    pod_count = 0
+    scored_count = 0
+    for i in range(1, POD_IMAGE_EXPORT_N + 1):
+        feedback = str(row.get(f"pod_feedback_{i}") or "").strip()
+        score = str(row.get(f"pod_score_{i}") or "").strip()
+        if feedback or score:
+            pod_count += 1
+        if score:
+            scored_count += 1
+    return pod_count, scored_count
+
+
+def auto_is_pod_compliant(row: dict[str, str] | pd.Series) -> bool:
+    pod_count, scored_count = count_pod_stats(row)
+    return pod_count >= 3 and scored_count >= 2
+
+
+def build_beans_tracking_link(tracking_id: str) -> str:
+    return f"https://www.beansroute.ai/3pl-manager/tabs.html#searchTrackingId/{tracking_id}"
+
+
+def render_compliance_section(title: str, delivered_df: pd.DataFrame, state_key_prefix: str) -> None:
+    st.subheader(title)
+    if delivered_df.empty:
+        st.info("暂无已妥投运单。")
+        return
+
+    header_cols = st.columns([2, 2, 5, 2])
+    header_cols[0].markdown("**妥投日期（Delivered Date）**")
+    header_cols[1].markdown("**运单号（Tracking ID）**")
+    header_cols[2].markdown("**Beans 运单查询（查看 POD）**")
+    header_cols[3].markdown("**是否标记为合规**")
+
+    for idx, row in delivered_df.iterrows():
+        tracking_id = str(row.get("trakcing_id") or "")
+        delivered_time = str(row.get("delivered_time") or "")
+        compliant = st.session_state["pod_compliance_map"].get(tracking_id, False)
+
+        cols = st.columns([2, 2, 5, 2])
+        cols[0].write(delivered_time)
+        cols[1].write(tracking_id)
+        cols[2].markdown(f"[打开 Beans 查看 POD]({build_beans_tracking_link(tracking_id)})")
+        btn_label = "✅" if compliant else "❌"
+        if cols[3].button(btn_label, key=f"{state_key_prefix}_toggle_{idx}_{tracking_id}", use_container_width=True):
+            st.session_state["pod_compliance_map"][tracking_id] = not compliant
+            st.rerun()
+
+
 def normalize_tracking_ids(raw_ids: list[str], uppercase: bool = False) -> tuple[list[str], list[str], Counter]:
     cleaned: list[str] = []
     for value in raw_ids:
@@ -458,6 +507,8 @@ def main() -> None:
         st.session_state["result_df"] = None
     if "failures" not in st.session_state:
         st.session_state["failures"] = []
+    if "pod_compliance_map" not in st.session_state:
+        st.session_state["pod_compliance_map"] = {}
 
     st.subheader("1) 输入 Tracking IDs")
     mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
@@ -542,6 +593,15 @@ def main() -> None:
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
+
+        compliance_map: dict[str, bool] = {}
+        for _, row in result_df.iterrows():
+            tracking_id = str(row.get("trakcing_id") or "")
+            if not tracking_id:
+                continue
+            compliance_map[tracking_id] = auto_is_pod_compliant(row)
+        st.session_state["pod_compliance_map"] = compliance_map
+
         status.text("处理完成")
 
     result_df: pd.DataFrame | None = st.session_state.get("result_df")
@@ -569,6 +629,14 @@ def main() -> None:
         st.subheader("结果预览")
         st.dataframe(result_df.head(50), use_container_width=True)
 
+        delivered_df = result_df[result_df["delivered_time"].astype(str).str.strip() != ""].copy()
+        if not delivered_df.empty:
+            delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
+            delivered_df = delivered_df.sort_values(by=["_delivered_dt", "trakcing_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
+
+        render_compliance_section("POD审核", delivered_df, "pod_review")
+        render_compliance_section("已妥投", delivered_df, "delivered")
+
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_data = result_df.to_csv(index=False).encode("utf-8-sig")
         xlsx_data = None
@@ -595,4 +663,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
