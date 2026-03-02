@@ -2,7 +2,7 @@ import io
 import os
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -10,6 +10,12 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# ---- MySQL (read from env; DO NOT hardcode secrets) ----
+MYSQL_HOST = os.getenv("MYSQL_HOST", "")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "")
 
 # API configuration comes from code/env only (not exposed in UI).
 API_URL_TEMPLATE = os.getenv(
@@ -95,7 +101,6 @@ def read_uploaded_ids(uploaded_file) -> list[str]:
         series = df[preferred[0]].dropna()
         return series.astype(str).tolist()
 
-    # Fallback: flatten all cells, keep non-empty values.
     values: list[str] = []
     for col in df.columns:
         values.extend(df[col].dropna().astype(str).tolist())
@@ -120,10 +125,6 @@ def diff_hours(end_dt: datetime | None, start_dt: datetime | None) -> str:
     if not end_dt or not start_dt:
         return ""
     return f"{(end_dt - start_dt).total_seconds() / 3600:.2f}"
-
-
-def as_list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
 
 
 def parse_route(description: Any) -> str:
@@ -264,13 +265,6 @@ def extract_shipper_name_from_events(events: list[dict[str, Any]]) -> str:
 
 
 def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """
-    Try to extract POD images list from the "success/delivered" event.
-
-    Common shapes (based on sample responses):
-      success_evt["pod"]["images"] -> list
-      success_evt["pods"]["pod"][0]["images"] -> list
-    """
     if not success_evt:
         return []
 
@@ -341,8 +335,6 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "整体配送时间": diff_hours(delivered_time, created_time),
     }
 
-    # --- POD feedback / score columns ---
-    # initialize columns to empty (important when there are fewer than N images)
     for i in range(1, POD_IMAGE_EXPORT_N + 1):
         row[f"pod_feedback_{i}"] = ""
         row[f"pod_score_{i}"] = ""
@@ -352,7 +344,6 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         q = img.get("quality")
         if not isinstance(q, dict):
             continue
-
         row[f"pod_feedback_{i}"] = str(q.get("feedback") or "")
         score_val = q.get("score")
         row[f"pod_score_{i}"] = "" if score_val is None else str(score_val)
@@ -398,6 +389,63 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def _require_db_env() -> None:
+    missing = []
+    if not MYSQL_HOST:
+        missing.append("MYSQL_HOST")
+    if not MYSQL_USERNAME:
+        missing.append("MYSQL_USERNAME")
+    if not MYSQL_PASSWORD:
+        missing.append("MYSQL_PASSWORD")
+    if not MYSQL_DATABASE:
+        missing.append("MYSQL_DATABASE")
+    if missing:
+        raise RuntimeError(f"MySQL 环境变量未配置：{', '.join(missing)}")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str]:
+    """
+    Query waybill_waybills for tracking_number where created_at is between [start_date, end_date] inclusive.
+    """
+    _require_db_env()
+
+    # lazy import so the app can still run without DB deps until this mode is used
+    try:
+        import pymysql  # type: ignore
+    except Exception as e:
+        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+
+    if end_date < start_date:
+        return []
+
+    conn = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USERNAME,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+    try:
+        with conn.cursor() as cur:
+            sql = """
+                SELECT tracking_number
+                FROM waybill_waybills
+                WHERE created_at >= %s AND created_at <= %s
+                AND tracking_number IS NOT NULL AND tracking_number <> ''
+                ORDER BY created_at ASC
+            """
+            cur.execute(sql, (start_date, end_date))
+            rows = cur.fetchall() or []
+            return [str(r["tracking_number"]).strip() for r in rows if r.get("tracking_number")]
+    finally:
+        conn.close()
+
+
 def main() -> None:
     st.set_page_config(page_title="Tracking Export", layout="wide")
     st.title("Tracking Export")
@@ -410,12 +458,36 @@ def main() -> None:
         st.session_state["failures"] = []
 
     st.subheader("1) 输入 Tracking IDs")
-    mode = st.radio("输入方式", ["上传文件", "文本粘贴"], horizontal=True)
+    mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
 
     raw_ids: list[str] = []
-    if mode == "上传文件":
+
+    if mode == "数据库按日期":
+        c1, c2 = st.columns(2)
+        with c1:
+            start_d = st.date_input("起始日期 (Created_at)", value=date.today() - timedelta(days=1))
+        with c2:
+            end_d = st.date_input("结束日期 (Created_at)", value=date.today())
+
+        btn = st.button("从数据库加载运单号", type="primary")
+        if btn:
+            with st.spinner("查询数据库中..."):
+                try:
+                    raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
+                    if not raw_ids:
+                        st.warning("该日期范围内未找到任何 tracking_number")
+                except Exception as e:
+                    st.error(str(e))
+                    raw_ids = []
+
+        if raw_ids:
+            with st.expander(f"数据库返回运单号预览（前 50 / 共 {len(raw_ids)}）", expanded=False):
+                st.write(raw_ids[:50])
+
+    elif mode == "上传文件":
         file = st.file_uploader("上传 CSV 或 XLSX", type=["csv", "xlsx"])
         raw_ids = read_uploaded_ids(file)
+
     else:
         text = st.text_area("粘贴 Tracking IDs（支持换行/逗号/空格分隔）", height=180)
         raw_ids = split_text_ids(text)
@@ -424,10 +496,10 @@ def main() -> None:
     duplicate_ids = [k for k, v in counter.items() if v > 1]
     st.session_state["dedup_ids"] = dedup_ids
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("input_count", len(cleaned))
-    c2.metric("unique_count", len(dedup_ids))
-    c3.metric("duplicate_count", len(cleaned) - len(dedup_ids))
+    m1, m2, m3 = st.columns(3)
+    m1.metric("input_count", len(cleaned))
+    m2.metric("unique_count", len(dedup_ids))
+    m3.metric("duplicate_count", len(cleaned) - len(dedup_ids))
 
     if duplicate_ids:
         with st.expander("重复 Tracking IDs"):
@@ -450,8 +522,7 @@ def main() -> None:
                     rows_by_id[tracking_id] = build_row(tracking_id, payload)
                 except requests.HTTPError as e:
                     code = e.response.status_code if e.response is not None else "N/A"
-                    reason = f"HTTP {code}"
-                    failures.append({"tracking_id": tracking_id, "reason": reason})
+                    failures.append({"tracking_id": tracking_id, "reason": f"HTTP {code}"})
                     rows_by_id[tracking_id] = empty_row(tracking_id)
                 except Exception as e:  # noqa: BLE001
                     failures.append({"tracking_id": tracking_id, "reason": str(e)})
@@ -472,6 +543,7 @@ def main() -> None:
     if result_df is not None:
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
+
         s1, s2 = st.columns(2)
         s1.metric("成功数量", success_count)
         s2.metric("失败数量", fail_count)
