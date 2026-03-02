@@ -48,7 +48,7 @@ OUTPUT_COLUMNS = [
 # -----------------------------
 # Helpers
 # -----------------------------
-def _headers() -> dict[str, str]:␊
+def _headers() -> dict[str, str]:
     h = {
         "Accept": "application/json",
         "User-Agent": "Fimile-Routes-Export/1.0",
@@ -445,6 +445,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
