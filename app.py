@@ -466,6 +466,136 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(pd.NaT, index=df.index)
+    return pd.to_datetime(df[column], errors="coerce")
+
+
+def rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
+
+
+def render_kpi_charts(result_df: pd.DataFrame) -> None:
+    st.subheader("3) 时效与质量 KPI 图表")
+    if result_df.empty:
+        st.info("暂无数据，无法计算 KPI。")
+        return
+
+    df = result_df.copy()
+    df["created_dt"] = to_datetime_series(df, "created_time")
+    df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
+    df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
+    df["ofd_dt"] = to_datetime_series(df, "out_for_delivery_time")
+    df["attempted_dt"] = to_datetime_series(df, "attempted_time")
+    df["delivered_dt"] = to_datetime_series(df, "delivered_time")
+
+    df["month"] = df["created_dt"].dt.to_period("M").astype(str)
+    df.loc[df["month"] == "NaT", "month"] = "未知"
+
+    df["ofd_to_delivered_hours"] = (df["delivered_dt"] - df["ofd_dt"]).dt.total_seconds() / 3600
+    ofd_base = df[df["ofd_dt"].notna()].copy()
+
+    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
+    delivered_cols = st.columns(3)
+    for i, threshold in enumerate([24, 48, 72]):
+        within = ofd_base[
+            ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
+        ]
+        delivered_cols[i].metric(
+            f"<{threshold}h 妥投率",
+            f"{rate(len(within), len(ofd_base)):.2%}",
+            f"{len(within)}/{len(ofd_base)}",
+        )
+
+        by_month = (
+            ofd_base.assign(hit=(ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)).astype(int))
+            .groupby("month", as_index=False)
+            .agg(total=("trakcing_id", "count"), hits=("hit", "sum"))
+        )
+        by_month[f"<{threshold}h_rate"] = by_month["hits"] / by_month["total"]
+        st.bar_chart(by_month.set_index("month")[[f"<{threshold}h_rate"]])
+
+    st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
+    df["created_to_scan_hours"] = (df["first_scanned_dt"] - df["created_dt"]).dt.total_seconds() / 3600
+    scan_cols = st.columns(4)
+    total_count = len(df)
+    for i, threshold in enumerate([12, 24, 48, 72]):
+        within = df[
+            df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)
+        ]
+        scan_cols[i].metric(
+            f"<{threshold}h 上网率",
+            f"{rate(len(within), total_count):.2%}",
+            f"{len(within)}/{total_count}",
+        )
+
+        by_month = (
+            df.assign(hit=(df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)).astype(int))
+            .groupby("month", as_index=False)
+            .agg(total=("trakcing_id", "count"), hits=("hit", "sum"))
+        )
+        by_month[f"<{threshold}h_rate"] = by_month["hits"] / by_month["total"]
+        st.bar_chart(by_month.set_index("month")[[f"<{threshold}h_rate"]])
+
+    st.markdown("#### 月丢包率（First Scan 后无后续轨迹）")
+    has_followup = (
+        (df["last_scanned_dt"].notna() & (df["last_scanned_dt"] > df["first_scanned_dt"]))
+        | df["ofd_dt"].notna()
+        | df["attempted_dt"].notna()
+        | df["delivered_dt"].notna()
+    )
+    scanned_base = df[df["first_scanned_dt"].notna()].copy()
+    scanned_base["lost"] = (~has_followup.loc[scanned_base.index]).astype(int)
+    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("trakcing_id", "count"), lost=("lost", "sum"))
+    if not monthly_lost.empty:
+        monthly_lost["丢包率"] = monthly_lost["lost"] / monthly_lost["total"]
+        st.metric("整体月丢包率口径", f"{rate(int(monthly_lost['lost'].sum()), int(monthly_lost['total'].sum())):.2%}")
+        st.bar_chart(monthly_lost.set_index("month")[["丢包率"]])
+    else:
+        st.info("没有 First Scan 数据，无法计算月丢包率。")
+
+    st.markdown("#### 月破损率（预留）")
+    st.info("预留区域：月破损率指标待后续开发。")
+
+    st.markdown("#### 24小时首次尝试派送率")
+    ofd_base["first_attempt_within_24h"] = (
+        ((ofd_base["attempted_dt"] - ofd_base["created_dt"]).dt.total_seconds() / 3600 <= 24)
+        | ((ofd_base["delivered_dt"] - ofd_base["created_dt"]).dt.total_seconds() / 3600 <= 24)
+    ) & ofd_base["created_dt"].notna()
+    first_attempt_hits = int(ofd_base["first_attempt_within_24h"].fillna(False).sum())
+    st.metric("24h 首次尝试派送率", f"{rate(first_attempt_hits, len(ofd_base)):.2%}", f"{first_attempt_hits}/{len(ofd_base)}")
+    monthly_first_attempt = ofd_base.groupby("month", as_index=False).agg(
+        total=("trakcing_id", "count"),
+        hits=("first_attempt_within_24h", "sum"),
+    )
+    if not monthly_first_attempt.empty:
+        monthly_first_attempt["24h首次尝试派送率"] = monthly_first_attempt["hits"] / monthly_first_attempt["total"]
+        st.bar_chart(monthly_first_attempt.set_index("month")[["24h首次尝试派送率"]])
+
+    st.markdown("#### 24小时第一次派送成功率")
+    ofd_base["first_success_within_24h"] = (
+        ofd_base["attempted_dt"].isna()
+        & ofd_base["delivered_dt"].notna()
+        & (((ofd_base["delivered_dt"] - ofd_base["created_dt"]).dt.total_seconds() / 3600) <= 24)
+        & ofd_base["created_dt"].notna()
+    )
+    first_success_hits = int(ofd_base["first_success_within_24h"].fillna(False).sum())
+    st.metric("24h 第一次派送成功率", f"{rate(first_success_hits, len(ofd_base)):.2%}", f"{first_success_hits}/{len(ofd_base)}")
+    monthly_first_success = ofd_base.groupby("month", as_index=False).agg(
+        total=("trakcing_id", "count"),
+        hits=("first_success_within_24h", "sum"),
+    )
+    if not monthly_first_success.empty:
+        monthly_first_success["24h第一次派送成功率"] = monthly_first_success["hits"] / monthly_first_success["total"]
+        st.bar_chart(monthly_first_success.set_index("month")[["24h第一次派送成功率"]])
+
+    st.markdown("#### 拦截成功率（预留）")
+    st.info("预留区域：拦截成功率指标待后续开发。")
+
+
 def _require_db_env() -> None:
     missing = []
     if not MYSQL_HOST:
@@ -730,6 +860,8 @@ def main() -> None:
         st.subheader("结果预览")
         st.dataframe(result_df.head(50), use_container_width=True)
 
+        render_kpi_charts(result_df)
+
         delivered_df = result_df[result_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
             delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
@@ -764,6 +896,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
