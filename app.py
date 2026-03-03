@@ -584,7 +584,7 @@ def build_kpi_report_payload(result_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any]) -> bytes:
+def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFrame | None = None) -> bytes:
     output = io.BytesIO()
     metrics_df = pd.DataFrame(kpi_payload["metrics"])
     chart_df = pd.DataFrame(kpi_payload["charts"])
@@ -592,6 +592,8 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any]) -> bytes:
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         metrics_df.to_excel(writer, index=False, sheet_name="kpi_summary")
         chart_df.to_excel(writer, index=False, sheet_name="kpi_chart_data")
+        if detail_df is not None and not detail_df.empty:
+            detail_df.to_excel(writer, index=False, sheet_name="detail_data")
 
         workbook = writer.book
         data_ws = writer.sheets["kpi_chart_data"]
@@ -605,6 +607,9 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any]) -> bytes:
         data_ws.set_column("A:B", 32)
         data_ws.set_column("C:C", 12)
         data_ws.set_column("D:D", 14, percent_fmt)
+        if detail_df is not None and not detail_df.empty:
+            detail_ws = writer.sheets["detail_data"]
+            detail_ws.set_column(0, max(len(detail_df.columns) - 1, 0), 20)
 
         row_cursor = 0
         for chart_name, group in chart_df.groupby("图表", sort=False):
@@ -1051,34 +1056,18 @@ def main() -> None:
             delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
             delivered_df = delivered_df.sort_values(by=["_delivered_dt", "trakcing_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
 
-        render_compliance_section("POD审核", delivered_df, "pod_review")
-        render_compliance_section("已妥投", delivered_df, "delivered")
-
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_data = result_df.to_csv(index=False).encode("utf-8-sig")
-        xlsx_data = None
-        try:
-            xlsx_data = df_to_excel_bytes(result_df)
-        except Exception:
-            st.warning("当前环境缺少 Excel 依赖，已提供 CSV 下载。")
-
-        c_csv, c_xlsx, c_report = st.columns(3)
+        kpi_report_data = None
+        c_csv, c_report = st.columns(2)
         c_csv.download_button(
             "下载 CSV",
             data=csv_data,
             file_name=f"export_{stamp}.csv",
             mime="text/csv",
         )
-        if xlsx_data is not None:
-            c_xlsx.download_button(
-                "下载 Excel",
-                data=xlsx_data,
-                file_name=f"export_{stamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
         try:
-            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload)
+            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, result_df)
             c_report.download_button(
                 "下载数据报表（百分比+图表）",
                 data=kpi_report_data,
@@ -1086,9 +1075,13 @@ def main() -> None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
-            c_report.warning("当前环境缺少图表报表依赖，无法导出 KPI 报表。")
+            c_report.warning("当前环境缺少图表报表依赖，无法导出整合报表。")
+
+        render_compliance_section("POD审核测试", delivered_df, "pod_review")
+        render_compliance_section("已妥投", delivered_df, "delivered")
 
 
 if __name__ == "__main__":
     main()
+
 
