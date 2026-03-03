@@ -478,6 +478,41 @@ def rate(numerator: int, denominator: int) -> float:
     return numerator / denominator
 
 
+def render_percentage_pie(
+    title: str,
+    hit_count: int,
+    total_count: int,
+    hit_label: str = "达标",
+    miss_label: str = "未达标",
+) -> None:
+    if total_count <= 0:
+        st.info(f"{title}：暂无可用数据")
+        return
+
+    miss_count = max(total_count - hit_count, 0)
+    chart_df = pd.DataFrame({"分类": [hit_label, miss_label], "数量": [hit_count, miss_count]})
+    chart_df = chart_df[chart_df["数量"] > 0]
+    chart_df["占比"] = (chart_df["数量"] / total_count).map(lambda x: f"{x:.2%}")
+
+    st.caption(title)
+    st.vega_lite_chart(
+        chart_df,
+        {
+            "mark": {"type": "arc", "outerRadius": 100},
+            "encoding": {
+                "theta": {"field": "数量", "type": "quantitative"},
+                "color": {"field": "分类", "type": "nominal"},
+                "tooltip": [
+                    {"field": "分类", "type": "nominal"},
+                    {"field": "数量", "type": "quantitative"},
+                    {"field": "占比", "type": "nominal"},
+                ],
+            },
+        },
+        use_container_width=True,
+    )
+
+
 def render_kpi_charts(result_df: pd.DataFrame) -> None:
     st.subheader("3) 时效与质量 KPI 图表")
     if result_df.empty:
@@ -491,7 +526,6 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
     df["ofd_dt"] = to_datetime_series(df, "out_for_delivery_time")
     df["attempted_dt"] = to_datetime_series(df, "attempted_time")
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
-
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
     df.loc[df["month"] == "NaT", "month"] = "未知"
 
@@ -509,14 +543,13 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
             f"{rate(len(within), len(ofd_base)):.2%}",
             f"{len(within)}/{len(ofd_base)}",
         )
-
-        by_month = (
-            ofd_base.assign(hit=(ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)).astype(int))
-            .groupby("month", as_index=False)
-            .agg(total=("trakcing_id", "count"), hits=("hit", "sum"))
+        render_percentage_pie(
+            title=f"<{threshold}h 妥投占比",
+            hit_count=len(within),
+            total_count=len(ofd_base),
+            hit_label=f"<{threshold}h妥投",
+            miss_label=f">={threshold}h或未妥投",
         )
-        by_month[f"<{threshold}h_rate"] = by_month["hits"] / by_month["total"]
-        st.bar_chart(by_month.set_index("month")[[f"<{threshold}h_rate"]])
 
     st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
     df["created_to_scan_hours"] = (df["first_scanned_dt"] - df["created_dt"]).dt.total_seconds() / 3600
@@ -531,14 +564,13 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
             f"{rate(len(within), total_count):.2%}",
             f"{len(within)}/{total_count}",
         )
-
-        by_month = (
-            df.assign(hit=(df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)).astype(int))
-            .groupby("month", as_index=False)
-            .agg(total=("trakcing_id", "count"), hits=("hit", "sum"))
+        render_percentage_pie(
+            title=f"<{threshold}h 上网占比",
+            hit_count=len(within),
+            total_count=total_count,
+            hit_label=f"<{threshold}h上网",
+            miss_label=f">={threshold}h或未上网",
         )
-        by_month[f"<{threshold}h_rate"] = by_month["hits"] / by_month["total"]
-        st.bar_chart(by_month.set_index("month")[[f"<{threshold}h_rate"]])
 
     st.markdown("#### 月丢包率（First Scan 后无后续轨迹）")
     has_followup = (
@@ -551,9 +583,10 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
     scanned_base["lost"] = (~has_followup.loc[scanned_base.index]).astype(int)
     monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("trakcing_id", "count"), lost=("lost", "sum"))
     if not monthly_lost.empty:
-        monthly_lost["丢包率"] = monthly_lost["lost"] / monthly_lost["total"]
-        st.metric("整体月丢包率口径", f"{rate(int(monthly_lost['lost'].sum()), int(monthly_lost['total'].sum())):.2%}")
-        st.bar_chart(monthly_lost.set_index("month")[["丢包率"]])
+        lost_total = int(monthly_lost["lost"].sum())
+        scanned_total = int(monthly_lost["total"].sum())
+        st.metric("整体月丢包率口径", f"{rate(lost_total, scanned_total):.2%}")
+        render_percentage_pie("丢包占比", lost_total, scanned_total, hit_label="丢包", miss_label="未丢包")
     else:
         st.info("没有 First Scan 数据，无法计算月丢包率。")
 
@@ -567,13 +600,14 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
     ) & ofd_base["created_dt"].notna()
     first_attempt_hits = int(ofd_base["first_attempt_within_24h"].fillna(False).sum())
     st.metric("24h 首次尝试派送率", f"{rate(first_attempt_hits, len(ofd_base)):.2%}", f"{first_attempt_hits}/{len(ofd_base)}")
-    monthly_first_attempt = ofd_base.groupby("month", as_index=False).agg(
-        total=("trakcing_id", "count"),
-        hits=("first_attempt_within_24h", "sum"),
-    )
-    if not monthly_first_attempt.empty:
-        monthly_first_attempt["24h首次尝试派送率"] = monthly_first_attempt["hits"] / monthly_first_attempt["total"]
-        st.bar_chart(monthly_first_attempt.set_index("month")[["24h首次尝试派送率"]])
+    if not ofd_base.empty:
+        render_percentage_pie(
+            "24h 首次尝试派送占比",
+            first_attempt_hits,
+            len(ofd_base),
+            hit_label="24h内首次尝试",
+            miss_label="超24h或未尝试",
+        )
 
     st.markdown("#### 24小时第一次派送成功率")
     ofd_base["first_success_within_24h"] = (
@@ -584,13 +618,14 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
     )
     first_success_hits = int(ofd_base["first_success_within_24h"].fillna(False).sum())
     st.metric("24h 第一次派送成功率", f"{rate(first_success_hits, len(ofd_base)):.2%}", f"{first_success_hits}/{len(ofd_base)}")
-    monthly_first_success = ofd_base.groupby("month", as_index=False).agg(
-        total=("trakcing_id", "count"),
-        hits=("first_success_within_24h", "sum"),
-    )
-    if not monthly_first_success.empty:
-        monthly_first_success["24h第一次派送成功率"] = monthly_first_success["hits"] / monthly_first_success["total"]
-        st.bar_chart(monthly_first_success.set_index("month")[["24h第一次派送成功率"]])
+    if not ofd_base.empty:
+        render_percentage_pie(
+            "24h 第一次派送成功占比",
+            first_success_hits,
+            len(ofd_base),
+            hit_label="24h内首次成功",
+            miss_label="超24h或未成功",
+        )
 
     st.markdown("#### 拦截成功率（预留）")
     st.info("预留区域：拦截成功率指标待后续开发。")
@@ -839,6 +874,8 @@ def main() -> None:
     failures: list[dict[str, str]] = st.session_state.get("failures", [])
 
     if result_df is not None:
+        render_kpi_charts(result_df)
+
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
 
@@ -859,8 +896,6 @@ def main() -> None:
 
         st.subheader("结果预览")
         st.dataframe(result_df.head(50), use_container_width=True)
-
-        render_kpi_charts(result_df)
 
         delivered_df = result_df[result_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
