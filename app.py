@@ -479,7 +479,60 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-def build_kpi_report_payload(result_df: pd.DataFrame) -> dict[str, Any]:
+
+def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
+    base_mask = df["last_scanned_dt"].notna()
+    scanned_base = df[base_mask].copy()
+    if scanned_base.empty:
+        return {
+            "scanned_base": scanned_base,
+            "lost_mask": pd.Series(False, index=df.index),
+            "candidate_mask": pd.Series(False, index=df.index),
+            "immature_mask": pd.Series(False, index=df.index),
+        }
+
+    time_window_end = scanned_base["last_scanned_dt"] + pd.Timedelta(hours=72)
+    has_event_within_72h = (
+        (scanned_base["ofd_dt"].notna() & (scanned_base["ofd_dt"] > scanned_base["last_scanned_dt"]) & (scanned_base["ofd_dt"] <= time_window_end))
+        | (
+            scanned_base["attempted_dt"].notna()
+            & (scanned_base["attempted_dt"] > scanned_base["last_scanned_dt"])
+            & (scanned_base["attempted_dt"] <= time_window_end)
+        )
+        | (
+            scanned_base["delivered_dt"].notna()
+            & (scanned_base["delivered_dt"] > scanned_base["last_scanned_dt"])
+            & (scanned_base["delivered_dt"] <= time_window_end)
+        )
+    )
+
+    candidate_mask_base = ~has_event_within_72h
+
+    if fetch_reference_time is None:
+        fetch_reference_time = datetime.now()
+
+    last_scan_age_hours = (fetch_reference_time - scanned_base["last_scanned_dt"]).dt.total_seconds() / 3600
+    immature_mask_base = last_scan_age_hours < 72
+
+    lost_mask_base = candidate_mask_base & (~immature_mask_base)
+
+    candidate_mask = pd.Series(False, index=df.index)
+    candidate_mask.loc[scanned_base.index] = candidate_mask_base.to_numpy()
+
+    immature_mask = pd.Series(False, index=df.index)
+    immature_mask.loc[scanned_base.index] = immature_mask_base.to_numpy()
+
+    lost_mask = pd.Series(False, index=df.index)
+    lost_mask.loc[scanned_base.index] = lost_mask_base.to_numpy()
+
+    return {
+        "scanned_base": scanned_base,
+        "lost_mask": lost_mask,
+        "candidate_mask": candidate_mask,
+        "immature_mask": immature_mask,
+    }
+
+def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     df = result_df.copy()
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
@@ -545,20 +598,15 @@ def build_kpi_report_payload(result_df: pd.DataFrame) -> dict[str, Any]:
             ]
         )
 
-    has_followup = (
-        (df["last_scanned_dt"].notna() & (df["last_scanned_dt"] > df["first_scanned_dt"]))
-        | df["ofd_dt"].notna()
-        | df["attempted_dt"].notna()
-        | df["delivered_dt"].notna()
-    )
-    scanned_base = df[df["first_scanned_dt"].notna()].copy()
-    scanned_base["lost"] = (~has_followup.loc[scanned_base.index]).astype(int)
+    lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
+    scanned_base = lost_analysis["scanned_base"]
+    scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)
     monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("trakcing_id", "count"), lost=("lost", "sum"))
     lost_total = int(monthly_lost["lost"].sum()) if not monthly_lost.empty else 0
     scanned_total = int(monthly_lost["total"].sum()) if not monthly_lost.empty else 0
     metrics.append(
         {
-            "分类": "月丢包率（First Scan 后无后续轨迹）",
+            "分类": "月丢包率（Last Scan 72h 口径）",
             "指标": "整体月丢包率口径",
             "命中": lost_total,
             "总数": scanned_total,
@@ -683,13 +731,13 @@ def render_percentage_pie(
     )
 
 
-def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
+def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     st.subheader("3) 时效与质量 KPI 图表")
     if result_df.empty:
         st.info("暂无数据，无法计算 KPI。")
         return {"metrics": [], "charts": [], "has_monthly_lost_data": False, "monthly_lost": pd.DataFrame()}
 
-    kpi_payload = build_kpi_report_payload(result_df)
+    kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
     delivered_cols = st.columns(3)
@@ -727,7 +775,7 @@ def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
             miss_label=f">={threshold}h或未上网",
         )
 
-    st.markdown("#### 月丢包率（First Scan 后无后续轨迹）")
+    st.markdown("#### 月丢包率（Last Scan 后 72h 内无后续轨迹，且排除未满 72h 运单）")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
 
     first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
@@ -736,13 +784,16 @@ def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
     attempted_dt = to_datetime_series(result_df, "attempted_time")
     delivered_dt = to_datetime_series(result_df, "delivered_time")
 
-    has_followup = (
-        (last_scanned_dt.notna() & (last_scanned_dt > first_scanned_dt))
-        | ofd_dt.notna()
-        | attempted_dt.notna()
-        | delivered_dt.notna()
-    )
-    lost_condition = first_scanned_dt.notna() & (~has_followup)
+    analysis_df = result_df.copy()
+    analysis_df["first_scanned_dt"] = first_scanned_dt
+    analysis_df["last_scanned_dt"] = last_scanned_dt
+    analysis_df["ofd_dt"] = ofd_dt
+    analysis_df["attempted_dt"] = attempted_dt
+    analysis_df["delivered_dt"] = delivered_dt
+
+    lost_analysis = build_lost_package_analysis(analysis_df, fetch_reference_time=fetch_reference_time)
+    lost_condition = lost_analysis["lost_mask"]
+
     lost_detail_df = result_df.loc[
         lost_condition,
         [
@@ -783,7 +834,7 @@ def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
         else:
             st.dataframe(lost_detail_df, use_container_width=True)
     else:
-        st.info("没有 First Scan 数据，无法计算月丢包率。")
+        st.info("没有 Last Scan 数据，无法计算月丢包率。")
 
     st.markdown("#### 月破损率（预留）")
     st.info("预留区域：月破损率指标待后续开发。")
@@ -987,6 +1038,8 @@ def main() -> None:
         st.session_state["region_filter"] = "ALL"
     if "state_filter" not in st.session_state:
         st.session_state["state_filter"] = "ALL"
+    if "fetch_clicked_at" not in st.session_state:
+        st.session_state["fetch_clicked_at"] = None
 
     st.subheader("1) 输入 Tracking IDs")
     mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
@@ -1043,6 +1096,7 @@ def main() -> None:
 
     st.subheader("2) 调用 API 并导出")
     if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
+        st.session_state["fetch_clicked_at"] = datetime.now()
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
 
@@ -1119,7 +1173,7 @@ def main() -> None:
                 filtered_df["State"].fillna("").astype(str).str.strip() == selected_state
             ]
 
-        kpi_payload = render_kpi_charts(filtered_df)
+        kpi_payload = render_kpi_charts(filtered_df, fetch_reference_time=st.session_state.get("fetch_clicked_at"))
 
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
@@ -1174,8 +1228,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
 
 
