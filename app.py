@@ -36,6 +36,8 @@ for i in range(1, POD_IMAGE_EXPORT_N + 1):
 
 OUTPUT_COLUMNS = [
     "trakcing_id",
+    "Region",
+    "State",
     "shipperName",
     "created_time",
     "first_scanned_time",
@@ -52,6 +54,15 @@ OUTPUT_COLUMNS = [
     "送达时间",
     "整体配送时间",
 ]
+
+REGION_BY_STATE = {
+    "CA": "WE",
+    "TX": "WE",
+    "IL": "WE",
+    "NJ": "EA",
+    "GA": "EA",
+    "FL": "EA",
+}
 
 
 def count_pod_stats(row: dict[str, str] | pd.Series) -> tuple[int, int]:
@@ -406,6 +417,11 @@ def empty_row(tracking_id: str) -> dict[str, str]:
     return row
 
 
+def infer_region_from_state(state: str) -> str:
+    normalized_state = str(state or "").strip().upper()
+    return REGION_BY_STATE.get(normalized_state, "")
+
+
 def fetch_tracking_data(tracking_id: str, session: requests.Session) -> dict[str, Any]:
     if not API_URL_TEMPLATE:
         raise RuntimeError("KPI_API_URL_TEMPLATE 未配置")
@@ -495,6 +511,61 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
         conn.close()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
+    """
+    Query waybill_waybills.receive_province by tracking_number for given tracking_ids.
+    """
+    _require_db_env()
+
+    try:
+        import pymysql  # type: ignore
+    except Exception as e:
+        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+
+    if not tracking_ids:
+        return {}
+
+    tracking_ids_clean = tuple(str(tid).strip() for tid in tracking_ids if str(tid).strip())
+    if not tracking_ids_clean:
+        return {}
+
+    conn = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USERNAME,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+    receive_province_map: dict[str, str] = {}
+    try:
+        with conn.cursor() as cur:
+            chunk_size = 500
+            for i in range(0, len(tracking_ids_clean), chunk_size):
+                chunk = tracking_ids_clean[i : i + chunk_size]
+                placeholders = ", ".join(["%s"] * len(chunk))
+                sql = f"""
+                    SELECT tracking_number, receive_province
+                    FROM waybill_waybills
+                    WHERE tracking_number IN ({placeholders})
+                """
+                cur.execute(sql, chunk)
+                rows = cur.fetchall() or []
+                for row in rows:
+                    tracking_number = str(row.get("tracking_number") or "").strip()
+                    if not tracking_number:
+                        continue
+                    receive_province_map[tracking_number] = str(row.get("receive_province") or "").strip()
+    finally:
+        conn.close()
+
+    return receive_province_map
+
+
 def main() -> None:
     st.set_page_config(page_title="Tracking Export", layout="wide")
     st.title("Tracking Export")
@@ -567,6 +638,12 @@ def main() -> None:
     if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
         rows_by_id: dict[str, dict[str, str]] = {}
         failures: list[dict[str, str]] = []
+        receive_province_map: dict[str, str] = {}
+
+        try:
+            receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
+        except Exception as e:
+            st.warning(f"读取 State/Region 数据失败，将导出为空值：{e}")
 
         progress = st.progress(0)
         status = st.empty()
@@ -577,14 +654,26 @@ def main() -> None:
                 status.text(f"处理中：{idx}/{total} - {tracking_id}")
                 try:
                     payload = fetch_tracking_data(tracking_id, session)
-                    rows_by_id[tracking_id] = build_row(tracking_id, payload)
+                    row = build_row(tracking_id, payload)
+                    state = str(receive_province_map.get(tracking_id) or "").strip()
+                    row["State"] = state
+                    row["Region"] = infer_region_from_state(state)
+                    rows_by_id[tracking_id] = row
                 except requests.HTTPError as e:
                     code = e.response.status_code if e.response is not None else "N/A"
                     failures.append({"tracking_id": tracking_id, "reason": f"HTTP {code}"})
-                    rows_by_id[tracking_id] = empty_row(tracking_id)
+                    row = empty_row(tracking_id)
+                    state = str(receive_province_map.get(tracking_id) or "").strip()
+                    row["State"] = state
+                    row["Region"] = infer_region_from_state(state)
+                    rows_by_id[tracking_id] = row
                 except Exception as e:  # noqa: BLE001
                     failures.append({"tracking_id": tracking_id, "reason": str(e)})
-                    rows_by_id[tracking_id] = empty_row(tracking_id)
+                    row = empty_row(tracking_id)
+                    state = str(receive_province_map.get(tracking_id) or "").strip()
+                    row["State"] = state
+                    row["Region"] = infer_region_from_state(state)
+                    rows_by_id[tracking_id] = row
 
                 progress.progress(idx / total)
 
@@ -663,3 +752,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
