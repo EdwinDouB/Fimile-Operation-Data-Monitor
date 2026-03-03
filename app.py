@@ -33,6 +33,7 @@ DB_FETCH_BATCH_SIZE = max(100, int(os.getenv("DB_FETCH_BATCH_SIZE", "5000")))
 
 # How many POD images to export per tracking_id (each image can have its own quality.feedback/score)
 POD_IMAGE_EXPORT_N = int(os.getenv("POD_IMAGE_EXPORT_N", "5"))
+APP_VERSION = os.getenv("APP_VERSION", "a0.0.4")
 
 POD_COLUMNS: list[str] = []
 for i in range(1, POD_IMAGE_EXPORT_N + 1):
@@ -728,8 +729,44 @@ def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
 
     st.markdown("#### 月丢包率（First Scan 后无后续轨迹）")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+
+    lost_condition = (
+        result_df["first_scanned_time"].notna()
+        & (
+            result_df["last_scanned_time"].isna()
+            | (pd.to_datetime(result_df["last_scanned_time"], errors="coerce") <= pd.to_datetime(result_df["first_scanned_time"], errors="coerce"))
+        )
+        & result_df["out_for_delivery_time"].isna()
+        & result_df["attempted_time"].isna()
+        & result_df["delivered_time"].isna()
+    )
+    lost_detail_df = result_df.loc[
+        lost_condition,
+        [
+            "trakcing_id",
+            "Region",
+            "State",
+            "shipperName",
+            "created_time",
+            "first_scanned_time",
+            "last_scanned_time",
+            "out_for_delivery_time",
+            "attempted_time",
+            "delivered_time",
+        ],
+    ].copy()
+
     if kpi_payload.get("has_monthly_lost_data") and monthly_lost_metric:
-        st.metric("整体月丢包率口径", f"{monthly_lost_metric['占比']:.2%}")
+        metric_cols = st.columns([2, 1])
+        metric_cols[0].metric("整体月丢包率口径", f"{monthly_lost_metric['占比']:.2%}")
+        metric_cols[1].download_button(
+            "下载丢包明细",
+            data=lost_detail_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"lost_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=lost_detail_df.empty,
+        )
         render_percentage_pie(
             "丢包占比",
             int(monthly_lost_metric["命中"]),
@@ -737,6 +774,11 @@ def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
             hit_label="丢包",
             miss_label="未丢包",
         )
+        st.markdown("##### 丢包明细")
+        if lost_detail_df.empty:
+            st.info("当前无符合丢包条件的运单。")
+        else:
+            st.dataframe(lost_detail_df, use_container_width=True)
     else:
         st.info("没有 First Scan 数据，无法计算月丢包率。")
 
@@ -924,8 +966,9 @@ def process_tracking_ids(
 
 
 def main() -> None:
-    st.set_page_config(page_title="fimile美区运单运营数据分析系统", layout="wide")
+    st.set_page_config(page_title="Fimile美区运单运营数据分析系统", layout="wide")
     st.title("fimile美区运单运营数据分析系统")
+    st.caption(f"版本号：{APP_VERSION}")
 
     if "dedup_ids" not in st.session_state:
         st.session_state["dedup_ids"] = []
@@ -1083,5 +1126,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
