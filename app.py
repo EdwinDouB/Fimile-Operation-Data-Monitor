@@ -419,15 +419,19 @@ def empty_row(tracking_id: str) -> dict[str, str]:
     row["trakcing_id"] = tracking_id
     return row
 
+def normalize_state(state: str) -> str:
+    normalized_state = str(state or "").strip().upper()
+    if not normalized_state:
+        return ""
+
+    compact_state = re.sub(r"[^A-Z]", "", normalized_state)
+    return STATE_ALIAS.get(normalized_state, STATE_ALIAS.get(compact_state, normalized_state))
+
 
 def infer_region_from_state(state: str) -> str:
     normalized_state = normalize_state(state)
     return REGION_BY_STATE.get(normalized_state, "")
 
-
-def normalize_state(state: str) -> str:
-    normalized_state = str(state or "").strip().upper()
-    return STATE_ALIAS.get(normalized_state, normalized_state)
 
 
 def fetch_tracking_data(tracking_id: str, session: requests.Session) -> dict[str, Any]:
@@ -760,5 +764,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
