@@ -1146,7 +1146,7 @@ def main() -> None:
             st.write(duplicate_ids)
 
     st.subheader("2) 调用 API 并导出")
-    if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):␊
+    if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
         st.session_state["fetch_clicked_at"] = datetime.now(timezone.utc)
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
@@ -1279,6 +1279,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
