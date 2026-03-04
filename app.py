@@ -66,6 +66,9 @@ OUTPUT_COLUMNS = [
     "Region",
     "State",
     "shipperName",
+    "Driver",
+    "Warehouse",
+    "Contractor",
     "has_customer_service",
     "created_time",
     "first_scanned_time",
@@ -572,6 +575,102 @@ def fetch_routes_report_via_curl(
 
     body = completed.stdout.strip() or "{}"
     return json.loads(body)
+
+
+def build_routes_report_headers() -> dict[str, str]:
+    headers = {"Accept": "text/csv,application/json"}
+    if not ROUTES_REPORT_TOKEN:
+        return headers
+
+    token = ROUTES_REPORT_TOKEN.strip()
+    if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
+        headers["Authorization"] = token
+    else:
+        headers["Authorization"] = f"Basic {token}"
+    return headers
+
+
+def parse_routes_report_csv(csv_text: str) -> pd.DataFrame:
+    if not csv_text.strip():
+        return pd.DataFrame()
+
+    parse_candidates = [
+        {"sep": "\t", "dtype": str},
+        {"dtype": str},
+    ]
+    for kwargs in parse_candidates:
+        try:
+            df = pd.read_csv(io.StringIO(csv_text), **kwargs)
+            if not df.empty and len(df.columns) > 1:
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+def fetch_routes_report_enrichment_map(
+    tracking_ids: list[str],
+    date_from: str,
+    date_to: str,
+    route_name: str = "",
+    address: str = "",
+    assignee_name: str = "",
+    route_payload_text: str = "",
+) -> dict[str, dict[str, str]]:
+    if not tracking_ids:
+        return {}
+
+    payload = fetch_routes_report_via_curl(
+        base_url=ROUTES_REPORT_BASE_URL,
+        date_from=date_from,
+        date_to=date_to,
+        route_name=route_name,
+        address=address,
+        package_number="",
+        assignee_name=assignee_name,
+        route_payload_text=route_payload_text,
+    )
+    reports = extract_reports_from_payload(payload)
+    if not reports:
+        return {}
+
+    headers = build_routes_report_headers()
+    target_ids = {str(item).strip() for item in tracking_ids if str(item).strip()}
+    enrichment_by_tracking: dict[str, dict[str, str]] = {}
+
+    for report in reports:
+        csv_url = str(report.get("csvUrl") or report.get("url") or "").strip()
+        if not csv_url:
+            continue
+
+        response = requests.get(csv_url, headers=headers, timeout=API_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        report_df = parse_routes_report_csv(response.text)
+        if report_df.empty:
+            continue
+
+        column_map = {str(col).strip().lower(): str(col) for col in report_df.columns}
+        tracking_col = column_map.get("tracking number")
+        driver_col = column_map.get("driver")
+        warehouse_col = column_map.get("warehouse")
+        contractor_col = column_map.get("contractor")
+        if not tracking_col:
+            continue
+
+        for _, row in report_df.iterrows():
+            tracking_id = str(row.get(tracking_col) or "").strip()
+            if not tracking_id or tracking_id not in target_ids:
+                continue
+            enrichment_by_tracking[tracking_id] = {
+                "Driver": str(row.get(driver_col) or "").strip() if driver_col else "",
+                "Warehouse": str(row.get(warehouse_col) or "").strip() if warehouse_col else "",
+                "Contractor": str(row.get(contractor_col) or "").strip() if contractor_col else "",
+            }
+
+        if len(enrichment_by_tracking) >= len(target_ids):
+            break
+
+    return enrichment_by_tracking
 
 
 def extract_reports_from_payload(payload: Any) -> list[dict[str, Any]]:
@@ -1255,6 +1354,15 @@ def main() -> None:
         with b_xls:
             req_xls = st.button("请求报告 (XLS)", use_container_width=True)
 
+        st.session_state["report_filters"] = {
+            "date_from": report_date_from.strftime("%Y-%m-%d"),
+            "date_to": report_date_to.strftime("%Y-%m-%d"),
+            "route_name": report_route_name,
+            "address": report_address,
+            "assignee_name": report_assignee_name,
+            "route_payload_text": report_route_payload,
+        }
+
         if req_csv or req_pdf or req_xls:
             try:
                 payload = fetch_routes_report_via_curl(
@@ -1307,6 +1415,15 @@ def main() -> None:
         st.session_state["fetch_clicked_at"] = None
     if "routes_reports" not in st.session_state:
         st.session_state["routes_reports"] = []
+    if "report_filters" not in st.session_state:
+        st.session_state["report_filters"] = {
+            "date_from": (date.today() - timedelta(days=7)).strftime("%Y-%m-%d"),
+            "date_to": date.today().strftime("%Y-%m-%d"),
+            "route_name": "",
+            "address": "",
+            "assignee_name": "",
+            "route_payload_text": "",
+        }
 
     st.subheader("1) 输入 Tracking IDs")
     mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
@@ -1381,6 +1498,29 @@ def main() -> None:
             progress_bar=progress,
             status_text=status,
         )
+
+        report_filters = st.session_state.get("report_filters", {})
+        try:
+            routes_report_map = fetch_routes_report_enrichment_map(
+                tracking_ids=dedup_ids,
+                date_from=str(report_filters.get("date_from") or ""),
+                date_to=str(report_filters.get("date_to") or ""),
+                route_name=str(report_filters.get("route_name") or ""),
+                address=str(report_filters.get("address") or ""),
+                assignee_name=str(report_filters.get("assignee_name") or ""),
+                route_payload_text=str(report_filters.get("route_payload_text") or ""),
+            )
+            if routes_report_map:
+                for idx, row in result_df.iterrows():
+                    tracking_id = str(row.get("trakcing_id") or "").strip()
+                    info = routes_report_map.get(tracking_id)
+                    if not info:
+                        continue
+                    result_df.at[idx, "Driver"] = info.get("Driver", "")
+                    result_df.at[idx, "Warehouse"] = info.get("Warehouse", "")
+                    result_df.at[idx, "Contractor"] = info.get("Contractor", "")
+        except Exception as e:
+            st.warning(f"Routes Report 增强信息获取失败（Driver/Warehouse/Contractor 将为空）：{e}")
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
