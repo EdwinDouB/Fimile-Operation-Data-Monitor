@@ -1209,7 +1209,7 @@ def main() -> None:
             status_text=status,
         )
 
-result_df = fill_route_identity_columns(result_df)
+        result_df = fill_route_identity_columns(result_df)
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
@@ -1324,4 +1324,3 @@ result_df = fill_route_identity_columns(result_df)
 
 if __name__ == "__main__":
     main()
-
