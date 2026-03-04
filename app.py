@@ -707,6 +707,7 @@ def render_percentage_pie(
     total_count: int,
     hit_label: str = "达标",
     miss_label: str = "未达标",
+    chart_key: str | None = None,
 ) -> None:
     if total_count <= 0:
         st.info(f"{title}：暂无可用数据")
@@ -733,6 +734,7 @@ def render_percentage_pie(
             },
         },
         use_container_width=True,
+        key=chart_key or f"pie_{title}_{hit_count}_{total_count}_{hit_label}_{miss_label}",
     )
 
 
@@ -743,6 +745,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
         return {"metrics": [], "charts": [], "has_monthly_lost_data": False, "monthly_lost": pd.DataFrame()}
 
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
+    refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
     delivered_cols = st.columns(3)
@@ -760,6 +763,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             total_count=int(metric["总数"]),
             hit_label=f"<{threshold}h妥投",
             miss_label=f">={threshold}h或未妥投",
+            chart_key=f"delivered_{threshold}_{refresh_key}",
         )
 
     st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
@@ -778,6 +782,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             total_count=int(metric["总数"]),
             hit_label=f"<{threshold}h上网",
             miss_label=f">={threshold}h或未上网",
+            chart_key=f"scan_{threshold}_{refresh_key}",
         )
 
     st.markdown("#### 月丢包率（Last Scan 后 72h 内无后续轨迹，且排除未满 72h 运单）")
@@ -832,6 +837,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             int(monthly_lost_metric["总数"]),
             hit_label="丢包",
             miss_label="未丢包",
+            chart_key=f"lost_{refresh_key}",
         )
         st.markdown("##### 丢包明细")
         if lost_detail_df.empty:
@@ -1233,5 +1239,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
