@@ -574,6 +574,46 @@ def fetch_routes_report_via_curl(
     return json.loads(body)
 
 
+def extract_reports_from_payload(payload: Any) -> list[dict[str, Any]]:
+    """兼容不同接口响应结构，提取 reports 列表。"""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    reports = payload.get("reports")
+    if isinstance(reports, list):
+        return [item for item in reports if isinstance(item, dict)]
+
+    # 一些接口会把数据包在 data/result/payload 等节点下
+    nested_candidate_keys = ("data", "result", "payload")
+    for key in nested_candidate_keys:
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            nested_reports = nested.get("reports")
+            if isinstance(nested_reports, list):
+                return [item for item in nested_reports if isinstance(item, dict)]
+
+    # 兜底：宽松递归扫描，避免字段命名变化导致 UI 无法展示
+    def _scan(node: Any) -> list[dict[str, Any]]:
+        if isinstance(node, dict):
+            for k, value in node.items():
+                if k == "reports" and isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+                found = _scan(value)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = _scan(item)
+                if found:
+                    return found
+        return []
+
+    return _scan(payload)
+
+
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1197,7 +1237,7 @@ def main() -> None:
                     assignee_name=report_assignee_name,
                     route_payload_text=report_route_payload,
                 )
-                requested_reports = payload.get("reports", []) if isinstance(payload, dict) else []
+                requested_reports = extract_reports_from_payload(payload)
                 st.session_state["routes_reports"] = requested_reports
                 if not requested_reports:
                     st.warning("请求成功，但未返回 reports。")
@@ -1422,6 +1462,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
