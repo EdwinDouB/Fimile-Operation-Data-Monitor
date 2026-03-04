@@ -491,8 +491,8 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
             "immature_mask": pd.Series(False, index=df.index),
         }
 
-    time_window_end = scanned_base["last_scanned_dt"] + pd.Timedelta(hours=72)
-    has_event_within_72h = (
+    time_window_end = scanned_base["last_scanned_dt"] + pd.Timedelta(hours=120)
+    has_event_within_120h = (
         (scanned_base["ofd_dt"].notna() & (scanned_base["ofd_dt"] > scanned_base["last_scanned_dt"]) & (scanned_base["ofd_dt"] <= time_window_end))
         | (
             scanned_base["attempted_dt"].notna()
@@ -506,7 +506,7 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
         )
     )
 
-    candidate_mask_base = ~has_event_within_72h
+    candidate_mask_base = ~has_event_within_120h
 
     if fetch_reference_time is None:
         fetch_reference_time_utc = datetime.now(timezone.utc)
@@ -517,7 +517,7 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
 
     last_scanned_utc = pd.to_datetime(scanned_base["last_scanned_dt"], errors="coerce", utc=True)
     last_scan_age_hours = (fetch_reference_time_utc - last_scanned_utc).dt.total_seconds() / 3600
-    immature_mask_base = last_scan_age_hours < 72
+    immature_mask_base = last_scan_age_hours < 120
 
     lost_mask_base = candidate_mask_base & (~immature_mask_base)
 
@@ -611,7 +611,7 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     scanned_total = int(monthly_lost["total"].sum()) if not monthly_lost.empty else 0
     metrics.append(
         {
-            "分类": "月丢包率（Last Scan 72h 口径）",
+            "分类": "月丢包率（Last Scan 120h 口径）",
             "指标": "整体月丢包率口径",
             "命中": lost_total,
             "总数": scanned_total,
@@ -785,7 +785,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             chart_key=f"scan_{threshold}_{refresh_key}",
         )
 
-    st.markdown("#### 月丢包率（Last Scan 后 72h 内无后续轨迹，且排除未满 72h 运单）")
+    st.markdown("#### 月丢包率（Last Scan 后 120h 内无后续轨迹，且排除未满 120h 运单）")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
 
     first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
@@ -1239,6 +1239,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
