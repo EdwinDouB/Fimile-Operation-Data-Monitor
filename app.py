@@ -95,6 +95,113 @@ STATE_ALIAS = {
     "NY": "NJ",
 }
 
+I18N = {
+    "zh": {
+        "language_label": "语言 / Language",
+        "app_title": "Fimile美区运单运营数据分析系统",
+        "version": "版本号：{version}",
+        "route_info": "Driver / Warehouse / Contractor 将从 Route Name 自动解析：HUB-路区号-日期-DSP-司机名",
+        "input_section": "1) 输入 Tracking IDs",
+        "input_mode": "输入方式",
+        "mode_db": "数据库按日期",
+        "mode_file": "上传文件",
+        "mode_text": "文本粘贴",
+        "start_date": "起始日期 (Created_at)",
+        "end_date": "结束日期 (Created_at)",
+        "load_btn": "从数据库加载运单号",
+        "loading_db": "查询数据库中...",
+        "no_tracking_found": "该日期范围内未找到任何 tracking_number",
+        "db_preview": "数据库返回运单号预览（前 50 / 共 {count}）",
+        "upload_file": "上传 CSV 或 XLSX",
+        "paste_ids": "粘贴 Tracking IDs（支持换行/逗号/空格分隔）",
+        "duplicate_ids": "重复 Tracking IDs",
+        "fetch_section": "2) 调用 API 并导出",
+        "fetch_btn": "Fetch / Export",
+        "state_region_fail": "读取 State/Region 数据失败，将导出为空值：{error}",
+        "processing": "处理中：{completed}/{total} - {tracking_id}",
+        "done": "处理完成",
+        "filter_view": "筛选视图",
+        "all": "ALL",
+        "success_count": "成功数量",
+        "fail_count": "失败数量",
+        "request_fail": "以下 tracking_id 请求失败",
+        "download_fail_csv": "下载失败列表 CSV",
+        "result_preview": "结果预览",
+        "download_csv": "下载 CSV",
+        "download_report": "下载数据报表（百分比+图表）",
+        "report_dep_missing": "当前环境缺少图表报表依赖，无法导出整合报表。",
+        "pod_review": "POD审核测试",
+        "delivered": "已妥投",
+        "no_delivered": "暂无已妥投运单。",
+        "delivered_date": "妥投日期（Delivered Date）",
+        "tracking_id": "运单号（Tracking ID）",
+        "beans_link": "Beans 运单查询（查看 POD）",
+        "compliant": "是否标记为合规",
+        "open_beans": "打开 Beans 查看 POD",
+        "kpi_title": "3) 时效与质量 KPI 图表",
+        "kpi_empty": "暂无数据，无法计算 KPI。",
+        "lost_detail": "丢包明细",
+        "download_lost": "下载丢包明细",
+        "lost_empty": "当前无符合丢包条件的运单。",
+        "lost_no_scan": "没有 Last Scan 数据，无法计算月丢包率。",
+    },
+    "en": {
+        "language_label": "语言 / Language",
+        "app_title": "Fimile US Shipment Operations Dashboard",
+        "version": "Version: {version}",
+        "route_info": "Driver / Warehouse / Contractor are auto-parsed from Route Name: HUB-Route-Date-DSP-Driver",
+        "input_section": "1) Input Tracking IDs",
+        "input_mode": "Input Method",
+        "mode_db": "Database by Date",
+        "mode_file": "Upload File",
+        "mode_text": "Paste Text",
+        "start_date": "Start Date (Created_at)",
+        "end_date": "End Date (Created_at)",
+        "load_btn": "Load Tracking IDs from DB",
+        "loading_db": "Querying database...",
+        "no_tracking_found": "No tracking numbers found in this date range",
+        "db_preview": "DB Tracking Preview (Top 50 / Total {count})",
+        "upload_file": "Upload CSV or XLSX",
+        "paste_ids": "Paste Tracking IDs (newline/comma/space separated)",
+        "duplicate_ids": "Duplicate Tracking IDs",
+        "fetch_section": "2) API Fetch and Export",
+        "fetch_btn": "Fetch / Export",
+        "state_region_fail": "Failed to load State/Region data. Export will contain empty values: {error}",
+        "processing": "Processing: {completed}/{total} - {tracking_id}",
+        "done": "Completed",
+        "filter_view": "Filter View",
+        "all": "ALL",
+        "success_count": "Success Count",
+        "fail_count": "Failure Count",
+        "request_fail": "The following tracking IDs failed",
+        "download_fail_csv": "Download Failed List CSV",
+        "result_preview": "Result Preview",
+        "download_csv": "Download CSV",
+        "download_report": "Download Data Report (Percentages + Charts)",
+        "report_dep_missing": "Chart/report dependency is missing in current environment; combined report export is unavailable.",
+        "pod_review": "POD Review",
+        "delivered": "Delivered",
+        "no_delivered": "No delivered waybills.",
+        "delivered_date": "Delivered Date",
+        "tracking_id": "Tracking ID",
+        "beans_link": "Beans Tracking Lookup (View POD)",
+        "compliant": "Marked as Compliant",
+        "open_beans": "Open Beans POD",
+        "kpi_title": "3) KPI Charts: Timeliness & Quality",
+        "kpi_empty": "No data available to calculate KPI.",
+        "lost_detail": "Lost Package Details",
+        "download_lost": "Download Lost Details",
+        "lost_empty": "No waybills match the lost-package condition.",
+        "lost_no_scan": "No Last Scan data, monthly lost-package rate cannot be calculated.",
+    },
+}
+
+
+def tr(key: str, **kwargs: Any) -> str:
+    lang = st.session_state.get("language", "zh")
+    template = I18N.get(lang, I18N["zh"]).get(key, I18N["zh"].get(key, key))
+    return template.format(**kwargs)
+
 def count_pod_stats(row: dict[str, str] | pd.Series) -> tuple[int, int]:
     pod_count = 0
     scored_count = 0
@@ -120,14 +227,14 @@ def build_beans_tracking_link(tracking_id: str) -> str:
 def render_compliance_section(title: str, delivered_df: pd.DataFrame, state_key_prefix: str) -> None:
     st.subheader(title)
     if delivered_df.empty:
-        st.info("暂无已妥投运单。")
+        st.info(tr("no_delivered"))
         return
 
     header_cols = st.columns([2, 2, 5, 2])
-    header_cols[0].markdown("**妥投日期（Delivered Date）**")
-    header_cols[1].markdown("**运单号（Tracking ID）**")
-    header_cols[2].markdown("**Beans 运单查询（查看 POD）**")
-    header_cols[3].markdown("**是否标记为合规**")
+    header_cols[0].markdown(f"**{tr('delivered_date')}**")
+    header_cols[1].markdown(f"**{tr('tracking_id')}**")
+    header_cols[2].markdown(f"**{tr('beans_link')}**")
+    header_cols[3].markdown(f"**{tr('compliant')}**")
 
     for idx, row in delivered_df.iterrows():
         tracking_id = str(row.get("trakcing_id") or "")
@@ -137,7 +244,7 @@ def render_compliance_section(title: str, delivered_df: pd.DataFrame, state_key_
         cols = st.columns([2, 2, 5, 2])
         cols[0].write(delivered_time)
         cols[1].write(tracking_id)
-        cols[2].markdown(f"[打开 Beans 查看 POD]({build_beans_tracking_link(tracking_id)})")
+        cols[2].markdown(f"[{tr('open_beans')}]({build_beans_tracking_link(tracking_id)})")
         btn_label = "✅" if compliant else "❌"
         if cols[3].button(btn_label, key=f"{state_key_prefix}_toggle_{idx}_{tracking_id}", use_container_width=True):
             st.session_state["pod_compliance_map"][tracking_id] = not compliant
@@ -819,9 +926,9 @@ def render_percentage_pie(
 
 
 def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
-    st.subheader("3) 时效与质量 KPI 图表")
+    st.subheader(tr("kpi_title"))
     if result_df.empty:
-        st.info("暂无数据，无法计算 KPI。")
+        st.info(tr("kpi_empty"))
         return {"metrics": [], "charts": [], "has_monthly_lost_data": False, "monthly_lost": pd.DataFrame()}
 
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
@@ -904,7 +1011,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
         metric_cols = st.columns([2, 1])
         metric_cols[0].metric("整体月丢包率口径", f"{monthly_lost_metric['占比']:.2%}")
         metric_cols[1].download_button(
-            "下载丢包明细",
+            tr("download_lost"),
             data=lost_detail_df.to_csv(index=False).encode("utf-8-sig"),
             file_name=f"lost_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
@@ -919,13 +1026,13 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             miss_label="未丢包",
             chart_key=f"lost_{refresh_key}",
         )
-        st.markdown("##### 丢包明细")
+        st.markdown(f"##### {tr('lost_detail')}")
         if lost_detail_df.empty:
-            st.info("当前无符合丢包条件的运单。")
+            st.info(tr("lost_empty"))
         else:
             st.dataframe(lost_detail_df, use_container_width=True)
     else:
-        st.info("没有 Last Scan 数据，无法计算月丢包率。")
+        st.info(tr("lost_no_scan"))
 
     st.markdown("#### 月破损率（预留）")
     st.info("预留区域：月破损率指标待后续开发。")
@@ -1104,7 +1211,7 @@ def process_tracking_ids(
 
             completed += 1
             progress_bar.progress(completed / total)
-            status_text.text(f"处理中：{completed}/{total} - {tracking_id}")
+            status_text.text(tr("processing", completed=completed, total=total, tracking_id=tracking_id))
 
     ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
     return pd.DataFrame(ordered_rows, columns=OUTPUT_COLUMNS), failures
@@ -1112,10 +1219,10 @@ def process_tracking_ids(
 
 def main() -> None:
     st.set_page_config(page_title="Fimile美区运单运营数据分析系统", layout="wide")
-    st.title("fimile美区运单运营数据分析系统")
-    st.caption(f"版本号：{APP_VERSION}")
+    st.title(tr("app_title"))
+    st.caption(tr("version", version=APP_VERSION))
 
-    st.info("Driver / Warehouse / Contractor 将从 Route Name 自动解析：HUB-路区号-日期-DSP-司机名")
+    st.info(tr("route_info"))
 
     if "dedup_ids" not in st.session_state:
         st.session_state["dedup_ids"] = []
@@ -1133,28 +1240,36 @@ def main() -> None:
         st.session_state["state_filter"] = "ALL"
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
+    if "language" not in st.session_state:
+        st.session_state["language"] = "zh"
 
+    st.selectbox(
+        tr("language_label"),
+        options=["zh", "en"],
+        format_func=lambda x: "中文" if x == "zh" else "English",
+        key="language",
+    )
 
-    st.subheader("1) 输入 Tracking IDs")
-    mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
+    st.subheader(tr("input_section"))
+    mode = st.radio(tr("input_mode"), [tr("mode_db"), tr("mode_file"), tr("mode_text")], horizontal=True)
 
     raw_ids: list[str] = []
 
-    if mode == "数据库按日期":
+    if mode == tr("mode_db"):
         c1, c2 = st.columns(2)
         with c1:
-            start_d = st.date_input("起始日期 (Created_at)", value=date.today() - timedelta(days=1))
+            start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1))
         with c2:
-            end_d = st.date_input("结束日期 (Created_at)", value=date.today())
+            end_d = st.date_input(tr("end_date"), value=date.today())
 
-        btn = st.button("从数据库加载运单号", type="primary")
+        btn = st.button(tr("load_btn"), type="primary")
         if btn:
-            with st.spinner("查询数据库中..."):
+            with st.spinner(tr("loading_db")):
                 try:
                     raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
                     st.session_state["db_raw_ids"] = raw_ids
                     if not raw_ids:
-                        st.warning("该日期范围内未找到任何 tracking_number")
+                        st.warning(tr("no_tracking_found"))
                 except Exception as e:
                     st.error(str(e))
                     raw_ids = []
@@ -1164,15 +1279,15 @@ def main() -> None:
             raw_ids = st.session_state.get("db_raw_ids", [])
 
         if raw_ids:
-            with st.expander(f"数据库返回运单号预览（前 50 / 共 {len(raw_ids)}）", expanded=False):
+            with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
                 st.write(raw_ids[:50])
 
-    elif mode == "上传文件":
-        file = st.file_uploader("上传 CSV 或 XLSX", type=["csv", "xlsx"])
+    elif mode == tr("mode_file"):
+        file = st.file_uploader(tr("upload_file"), type=["csv", "xlsx"])
         raw_ids = read_uploaded_ids(file)
 
     else:
-        text = st.text_area("粘贴 Tracking IDs（支持换行/逗号/空格分隔）", height=180)
+        text = st.text_area(tr("paste_ids"), height=180)
         raw_ids = split_text_ids(text)
 
     cleaned, dedup_ids, counter = normalize_tracking_ids(raw_ids, uppercase=False)
@@ -1185,11 +1300,11 @@ def main() -> None:
     m3.metric("duplicate_count", len(cleaned) - len(dedup_ids))
 
     if duplicate_ids:
-        with st.expander("重复 Tracking IDs"):
+        with st.expander(tr("duplicate_ids")):
             st.write(duplicate_ids)
 
-    st.subheader("2) 调用 API 并导出")
-    if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
+    st.subheader(tr("fetch_section"))
+    if st.button(tr("fetch_btn"), type="primary", disabled=not dedup_ids):
         st.session_state["fetch_clicked_at"] = datetime.now()
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
@@ -1197,7 +1312,7 @@ def main() -> None:
         try:
             receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
         except Exception as e:
-            st.warning(f"读取 State/Region 数据失败，将导出为空值：{e}")
+            st.warning(tr("state_region_fail", error=e))
 
         progress = st.progress(0)
         status = st.empty()
@@ -1222,19 +1337,19 @@ def main() -> None:
             compliance_map[tracking_id] = auto_is_pod_compliant(row)
         st.session_state["pod_compliance_map"] = compliance_map
 
-        status.text("处理完成")
+        status.text(tr("done"))
 
     result_df: pd.DataFrame | None = st.session_state.get("result_df")
     failures: list[dict[str, str]] = st.session_state.get("failures", [])
 
     if result_df is not None:
-        st.subheader("筛选视图")
+        st.subheader(tr("filter_view"))
 
         region_series = result_df["Region"].fillna("").astype(str).str.strip()
-        region_options = ["ALL"] + sorted([item for item in region_series.unique().tolist() if item])
+        region_options = [tr("all")] + sorted([item for item in region_series.unique().tolist() if item])
 
         if st.session_state["region_filter"] not in region_options:
-            st.session_state["region_filter"] = "ALL"
+            st.session_state["region_filter"] = tr("all")
 
         selected_region = st.selectbox(
             "Region",
@@ -1242,16 +1357,16 @@ def main() -> None:
             key="region_filter",
         )
 
-        if selected_region == "ALL":
+        if selected_region == tr("all"):
             available_states_df = result_df
         else:
             available_states_df = result_df[result_df["Region"].fillna("").astype(str).str.strip() == selected_region]
 
         state_series = available_states_df["State"].fillna("").astype(str).str.strip()
-        state_options = ["ALL"] + sorted([item for item in state_series.unique().tolist() if item])
+        state_options = [tr("all")] + sorted([item for item in state_series.unique().tolist() if item])
 
         if st.session_state["state_filter"] not in state_options:
-            st.session_state["state_filter"] = "ALL"
+            st.session_state["state_filter"] = tr("all")
 
         selected_state = st.selectbox(
             "State",
@@ -1260,11 +1375,11 @@ def main() -> None:
         )
 
         filtered_df = result_df.copy()
-        if selected_region != "ALL":
+        if selected_region != tr("all"):
             filtered_df = filtered_df[
                 filtered_df["Region"].fillna("").astype(str).str.strip() == selected_region
             ]
-        if selected_state != "ALL":
+        if selected_state != tr("all"):
             filtered_df = filtered_df[
                 filtered_df["State"].fillna("").astype(str).str.strip() == selected_state
             ]
@@ -1275,21 +1390,21 @@ def main() -> None:
         fail_count = len(failures)
 
         s1, s2 = st.columns(2)
-        s1.metric("成功数量", success_count)
-        s2.metric("失败数量", fail_count)
+        s1.metric(tr("success_count"), success_count)
+        s2.metric(tr("fail_count"), fail_count)
 
         if failures:
-            st.error("以下 tracking_id 请求失败")
+            st.error(tr("request_fail"))
             fail_df = pd.DataFrame(failures)
             st.dataframe(fail_df, use_container_width=True)
             st.download_button(
-                "下载失败列表 CSV",
+                tr("download_fail_csv"),
                 data=fail_df.to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
             )
 
-        st.subheader("结果预览")
+        st.subheader(tr("result_preview"))
         st.dataframe(filtered_df.head(50), use_container_width=True)
 
         delivered_df = filtered_df[filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
@@ -1302,7 +1417,7 @@ def main() -> None:
         kpi_report_data = None
         c_csv, c_report = st.columns(2)
         c_csv.download_button(
-            "下载 CSV",
+            tr("download_csv"),
             data=csv_data,
             file_name=f"export_{stamp}.csv",
             mime="text/csv",
@@ -1310,16 +1425,16 @@ def main() -> None:
         try:
             kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, filtered_df)
             c_report.download_button(
-                "下载数据报表（百分比+图表）",
+                tr("download_report"),
                 data=kpi_report_data,
                 file_name=f"kpi_report_{stamp}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
-            c_report.warning("当前环境缺少图表报表依赖，无法导出整合报表。")
+            c_report.warning(tr("report_dep_missing"))
 
-        render_compliance_section("POD审核测试", delivered_df, "pod_review")
-        render_compliance_section("已妥投", delivered_df, "delivered")
+        render_compliance_section(tr("pod_review"), delivered_df, "pod_review")
+        render_compliance_section(tr("delivered"), delivered_df, "delivered")
 
 
 if __name__ == "__main__":
