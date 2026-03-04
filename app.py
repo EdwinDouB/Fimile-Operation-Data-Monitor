@@ -706,7 +706,16 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
 def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series(pd.NaT, index=df.index)
-    return pd.to_datetime(df[column], errors="coerce")
+
+    series_or_df = df.loc[:, column]
+    if isinstance(series_or_df, pd.DataFrame):
+        # Upstream merges can occasionally introduce duplicate column names.
+        # For KPI calculations we only need one datetime value per row, so
+        # collapse duplicate columns by taking the first non-null value.
+        series_or_df = series_or_df.bfill(axis=1).iloc[:, 0]
+
+    return pd.to_datetime(series_or_df, errors="coerce")
+
 
 
 def rate(numerator: int, denominator: int) -> float:
@@ -1279,6 +1288,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
