@@ -576,17 +576,35 @@ def fetch_routes_report_via_curl(
 
 def extract_reports_from_payload(payload: Any) -> list[dict[str, Any]]:
     """兼容不同接口响应结构，提取 reports 列表。"""
+
+    def _is_report_like(node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        known_keys = {"csvUrl", "pdfUrl", "xlsUrl", "xlsxUrl", "downloadUrl", "reportUrl", "url"}
+        return any(str(node.get(key) or "").strip() for key in known_keys)
+
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
+        report_items = [item for item in payload if isinstance(item, dict)]
+        if report_items:
+            return report_items
+        return []
 
     if not isinstance(payload, dict):
         return []
 
+    # 场景 1：标准结构 {"reports": [...]}。
     reports = payload.get("reports")
     if isinstance(reports, list):
         return [item for item in reports if isinstance(item, dict)]
 
-    # 一些接口会把数据包在 data/result/payload 等节点下
+    # 场景 2：单条结构 {"report": {...}} 或直接返回 url 字段。
+    report = payload.get("report")
+    if isinstance(report, dict):
+        return [report]
+    if _is_report_like(payload):
+        return [payload]
+
+    # 一些接口会把数据包在 data/result/payload 等节点下。
     nested_candidate_keys = ("data", "result", "payload")
     for key in nested_candidate_keys:
         nested = payload.get(key)
@@ -595,17 +613,29 @@ def extract_reports_from_payload(payload: Any) -> list[dict[str, Any]]:
             if isinstance(nested_reports, list):
                 return [item for item in nested_reports if isinstance(item, dict)]
 
-    # 兜底：宽松递归扫描，避免字段命名变化导致 UI 无法展示
+            nested_report = nested.get("report")
+            if isinstance(nested_report, dict):
+                return [nested_report]
+            if _is_report_like(nested):
+                return [nested]
+
+    # 兜底：宽松递归扫描，避免字段命名变化导致 UI 无法展示。
     def _scan(node: Any) -> list[dict[str, Any]]:
         if isinstance(node, dict):
             for k, value in node.items():
                 if k == "reports" and isinstance(value, list):
                     return [item for item in value if isinstance(item, dict)]
+                if k == "report" and isinstance(value, dict):
+                    return [value]
+                if _is_report_like(value):
+                    return [value]
                 found = _scan(value)
                 if found:
                     return found
         elif isinstance(node, list):
             for item in node:
+                if _is_report_like(item):
+                    return [item]
                 found = _scan(item)
                 if found:
                     return found
@@ -1240,7 +1270,10 @@ def main() -> None:
                 requested_reports = extract_reports_from_payload(payload)
                 st.session_state["routes_reports"] = requested_reports
                 if not requested_reports:
-                    st.warning("请求成功，但未返回 reports。")
+                    payload_keys = list(payload.keys()) if isinstance(payload, dict) else []
+                    st.warning("请求成功，但未识别到可下载报告链接。")
+                    if payload_keys:
+                        st.caption(f"响应字段：{', '.join(payload_keys)}")
             except Exception as e:
                 st.error(f"获取报告失败：{e}")
 
@@ -1462,10 +1495,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
