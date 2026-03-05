@@ -1029,18 +1029,48 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     c1, c2, c3 = st.columns(3)
     if delivered_24h:
         c1.metric("24小时妥投率", f"{delivered_24h['占比']:.2%}", f"{delivered_24h['命中']}/{delivered_24h['总数']}")
+        render_percentage_pie(
+            title="24小时妥投占比",
+            hit_count=int(delivered_24h["命中"]),
+            total_count=int(delivered_24h["总数"]),
+            hit_label="<24h妥投",
+            miss_label=">=24h或未妥投",
+            chart_key="compact_delivered_24h",
+            container=c1,
+        )
     else:
         c1.metric("24小时妥投率", "0.00%", "0/0")
+        c1.info("24小时妥投占比：暂无可用数据")
 
     if scan_24h:
         c2.metric("24小时上网率", f"{scan_24h['占比']:.2%}", f"{scan_24h['命中']}/{scan_24h['总数']}")
+        render_percentage_pie(
+            title="24小时上网占比",
+            hit_count=int(scan_24h["命中"]),
+            total_count=int(scan_24h["总数"]),
+            hit_label="<24h上网",
+            miss_label=">=24h或未上网",
+            chart_key="compact_scan_24h",
+            container=c2,
+        )
     else:
         c2.metric("24小时上网率", "0.00%", "0/0")
+        c2.info("24小时上网占比：暂无可用数据")
 
     if lost_metric:
         c3.metric("丢包率", f"{lost_metric['占比']:.2%}", f"{lost_metric['命中']}/{lost_metric['总数']}")
+        render_percentage_pie(
+            title="丢包占比",
+            hit_count=int(lost_metric["命中"]),
+            total_count=int(lost_metric["总数"]),
+            hit_label="丢包",
+            miss_label="未丢包",
+            chart_key="compact_lost_rate",
+            container=c3,
+        )
     else:
         c3.metric("丢包率", "0.00%", "0/0")
+        c3.info("丢包占比：暂无可用数据")
 
 
 def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
@@ -1733,5 +1763,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
