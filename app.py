@@ -1117,7 +1117,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             miss_label=f">={threshold}h或未上网",
             chart_key=f"scan_{threshold}_{refresh_key}",
             container=scan_cols[i],
-        ))
+        )
 
     st.markdown("#### 月丢包率（Last Scan 后 120h 内无后续轨迹，且排除未满 120h 运单）")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
@@ -1684,5 +1684,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
