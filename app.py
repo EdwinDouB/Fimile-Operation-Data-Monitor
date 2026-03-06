@@ -842,7 +842,7 @@ def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     return df[[col for col in df.columns if col not in EXPORT_EXCLUDED_COLUMNS]].copy()
 
 
-def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
+def build_customer_address_summary(df: pd.DataFrame) -> dict[str, object]:
     required_columns = [
         "sender_company",
         "sender_province",
@@ -852,16 +852,9 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         "trakcing_id",
     ]
 
-    output_columns = [
-        tr("scope"),
-        tr("state_group"),
-        tr("customer_name"),
-        tr("shipping_address"),
-        tr("package_count"),
-        tr("avg_daily_share"),
-    ]
+    output_columns = [tr("customer_name"), tr("shipping_address"), tr("package_count"), tr("avg_daily_share")]
     if df.empty or any(col not in df.columns for col in required_columns):
-        return pd.DataFrame(columns=output_columns)
+        return {"nationwide": pd.DataFrame(columns=output_columns), "states": {}}
 
     work_df = df.copy()
     work_df["sender_company"] = work_df["sender_company"].fillna("").astype(str).str.strip()
@@ -887,12 +880,13 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         & work_df["_ofd_day"].notna()
     ]
     if work_df.empty:
-        return pd.DataFrame(columns=output_columns)
+        return {"nationwide": pd.DataFrame(columns=output_columns), "states": {}}
 
     def summarize_address_share(
         source_df: pd.DataFrame,
         total_keys: list[str],
         detail_keys: list[str],
+        group_keys: list[str],
     ) -> pd.DataFrame:
         daily_total = source_df.groupby(total_keys)["trakcing_id"].count().rename("daily_total").reset_index()
         daily_group = (
@@ -903,51 +897,71 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         )
         daily_group = daily_group.merge(daily_total, on=total_keys, how="left")
         daily_group["daily_share"] = daily_group["daily_count"] / daily_group["daily_total"]
-        return (
-            daily_group.groupby([col for col in detail_keys if col != "_ofd_day"], as_index=False)
+        customer_metrics = (
+            daily_group.groupby(group_keys + ["_ofd_day"], as_index=False)
+            .agg(
+                daily_count=("daily_count", "sum"),
+                daily_share=("daily_share", "sum"),
+            )
+        )
+        customer_summary = (
+            customer_metrics.groupby(group_keys, as_index=False)
             .agg(
                 package_count=("daily_count", "sum"),
                 avg_daily_share=("daily_share", "mean"),
             )
-            .sort_values(by=["avg_daily_share", "package_count"], ascending=[False, False])
+        )
+        address_summary = (
+            source_df.groupby(group_keys)["shipping_address"]
+            .agg(lambda s: "；".join(sorted({addr for addr in s if addr})))
+            .reset_index(name="shipping_address")
+        )
+        return customer_summary.merge(address_summary, on=group_keys, how="left").sort_values(
+            by=["avg_daily_share", "package_count"],
+            ascending=[False, False],
         )
 
     nationwide_summary = summarize_address_share(
         work_df,
         total_keys=["_ofd_day"],
         detail_keys=["_ofd_day", "sender_company", "shipping_address"],
+        group_keys=["sender_company"],
     )
-    nationwide_summary["scope"] = tr("nationwide")
-    nationwide_summary["_state_group"] = tr("all")
-
-    state_summary = summarize_address_share(
-        work_df,
-        total_keys=["_ofd_day", "_state_group"],
-        detail_keys=["_ofd_day", "_state_group", "sender_company", "shipping_address"],
-    )
-    state_summary["scope"] = state_summary["_state_group"]
-
-    summary = pd.concat([nationwide_summary, state_summary], ignore_index=True)
-    summary["_scope_order"] = (summary["scope"] != tr("nationwide")).astype(int)
-
-    summary = summary.sort_values(
-        by=["_scope_order", "scope", "avg_daily_share", "package_count"],
-        ascending=[True, True, False, False],
-    ).drop(columns=["_scope_order"])
-
-    summary = summary.rename(
+    nationwide_display = nationwide_summary.rename(
         columns={
-            "scope": tr("scope"),
-            "_state_group": tr("state_group"),
             "sender_company": tr("customer_name"),
             "shipping_address": tr("shipping_address"),
             "package_count": tr("package_count"),
             "avg_daily_share": tr("avg_daily_share"),
         }
     )
-    summary[tr("avg_daily_share")] = summary[tr("avg_daily_share")].map(lambda x: f"{x:.2%}")
-    return summary[output_columns]
+    nationwide_display[tr("avg_daily_share")] = nationwide_display[tr("avg_daily_share")].map(lambda x: f"{x:.2%}")
 
+    state_tables: dict[str, pd.DataFrame] = {}
+    for state_name, state_df in work_df.groupby("_state_group"):
+        state_summary = summarize_address_share(
+            state_df,
+            total_keys=["_ofd_day"],
+            detail_keys=["_ofd_day", "sender_company", "shipping_address"],
+            group_keys=["sender_company"],
+        )
+        if state_summary.empty:
+            continue
+        state_display = state_summary.rename(
+            columns={
+                "sender_company": tr("customer_name"),
+                "shipping_address": tr("shipping_address"),
+                "package_count": tr("package_count"),
+                "avg_daily_share": tr("avg_daily_share"),
+            }
+        )
+        state_display[tr("avg_daily_share")] = state_display[tr("avg_daily_share")].map(lambda x: f"{x:.2%}")
+        state_tables[str(state_name)] = state_display[output_columns]
+
+    return {
+        "nationwide": nationwide_display[output_columns],
+        "states": dict(sorted(state_tables.items(), key=lambda x: x[0])),
+    }
 
 def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
     invalid_mask = (
@@ -2297,11 +2311,17 @@ def main() -> None:
         st.dataframe(preview_df.head(50), use_container_width=True)
 
         st.subheader(tr("customer_summary_section"))
-        customer_summary_df = build_customer_address_summary(filtered_df)
-        if customer_summary_df.empty:
+        customer_summary_data = build_customer_address_summary(filtered_df)
+        nationwide_df = customer_summary_data.get("nationwide", pd.DataFrame())
+        state_tables = customer_summary_data.get("states", {})
+        if nationwide_df.empty:
             st.info(tr("customer_summary_empty"))
         else:
-            st.dataframe(customer_summary_df, use_container_width=True)
+            st.markdown(f"**{tr('nationwide')}**")
+            st.dataframe(nationwide_df, use_container_width=True)
+            for state_name, state_df in state_tables.items():
+                st.markdown(f"**{state_name}**")
+                st.dataframe(state_df, use_container_width=True)
 
         invalid_route_df = build_invalid_route_summary(filtered_df)
         st.subheader(tr("invalid_route_section"))
@@ -2367,6 +2387,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
