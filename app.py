@@ -68,6 +68,7 @@ OUTPUT_COLUMNS = [
     "Hub",
     "Contractor",
     "Route_name",
+    "Route_type",
     "has_customer_service",
     "created_time",
     "first_scanned_time",
@@ -125,6 +126,9 @@ I18N = {
         "filter_view": "筛选视图",
         "invalid_route_section": "Route_name 不符合标准",
         "invalid_route_empty": "全部 Route_name 均符合标准。",
+        "pickup_section": "Pick up 路由（不计入妥投率统计）",
+        "pickup_empty": "当前没有 Pick up 路由。",
+        "download_pickup": "下载 Pick up 明细",
         "ofd_filter_start": "出库配送时间起始日期 (Out for Delivery)",
         "ofd_filter_end": "出库配送时间结束日期（不含当天） (Out for Delivery, Exclusive)",
         "all": "ALL",
@@ -184,6 +188,9 @@ I18N = {
         "filter_view": "Filter View",
         "invalid_route_section": "Invalid Route_name",
         "invalid_route_empty": "All Route_name values are compliant.",
+        "pickup_section": "Pick up routes (excluded from delivery-rate KPI)",
+        "pickup_empty": "No Pick up routes in current data.",
+        "download_pickup": "Download Pick up details",
         "ofd_filter_start": "Out for Delivery Start Date",
         "ofd_filter_end": "Out for Delivery End Date (Exclusive)",
         "all": "ALL",
@@ -359,13 +366,17 @@ def extract_route_parts(route_name: str) -> list[str]:
     if not text:
         return []
 
-    parts = [p.strip() for p in re.split(r"\s*[-–—]+\s*|\s+", text) if p and p.strip()]
-    return parts
+    dash_parts = [p.strip() for p in re.split(r"\s*[-–—]+\s*", text) if p and p.strip()]
+    if len(dash_parts) >= 2:
+        return dash_parts
+
+    return [p.strip() for p in text.split() if p and p.strip()]
 
 
 def is_valid_hub_name(hub: str) -> bool:
     """Hub must be exactly 3 letters (A-Z)."""
-    return bool(re.fullmatch(r"[A-Za-z]{3}", str(hub or "").strip()))
+    hub_text = str(hub or "").strip()
+    return bool(re.fullmatch(r"[A-Za-z]{3}", hub_text)) or hub_text.lower() == "pu"
 
 
 def is_valid_contractor_name(contractor: str) -> bool:
@@ -380,30 +391,42 @@ def parse_route_identity(route_name: str) -> dict[str, str]:
     """
     parts = extract_route_parts(route_name)
     if len(parts) < 2:
-        return {"Hub": "", "Contractor": "", "Driver": ""}
+        return {"Hub": "", "Contractor": "", "Driver": "", "Route_type": "delivery"}
 
     contractor = ""
     driver = ""
+    contractor_idx = -1
 
-    if len(parts) >= 4:
-        contractor = parts[-2]
-        driver = " ".join(parts[-1:]).title()
-    elif len(parts) == 3:
-        driver = parts[-1].title()
+    for idx in range(len(parts) - 1, 0, -1):
+        candidate = parts[idx].strip().upper()
+        if is_valid_contractor_name(candidate):
+            contractor = candidate
+            contractor_idx = idx
+            break
+
+    if contractor_idx >= 0:
+        driver_tokens = [token.strip() for token in parts[contractor_idx + 1 :] if token.strip()]
+        if driver_tokens:
+            driver = " ".join(driver_tokens).title()
+    elif len(parts) >= 2:
+        driver = parts[-1].strip().title()
 
     hub = parts[0].upper()
     if not is_valid_hub_name(hub):
         hub = ""
 
-    contractor = contractor.upper()
     if contractor and not is_valid_contractor_name(contractor):
         contractor = ""
+
+    route_type = "pickup" if hub == "PU" else "delivery"
 
     return {
         "Hub": hub,
         "Contractor": contractor,
         "Driver": driver,
+        "Route_type": route_type,
     }
+
 
 
 def normalize_events(payload: Any) -> list[dict[str, Any]]:
@@ -700,6 +723,9 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
+    if "Route_type" not in df.columns:
+        df["Route_type"] = ""
+
     for idx, row in df.iterrows():
         route_name = str(row.get("success_route") or row.get("failed_route") or "").strip()
         route_info = parse_route_identity(route_name)
@@ -707,8 +733,24 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         df.at[idx, "Driver"] = route_info["Driver"]
         df.at[idx, "Hub"] = route_info["Hub"]
         df.at[idx, "Contractor"] = route_info["Contractor"]
+        df.at[idx, "Route_type"] = route_info["Route_type"]
     return df
 
+
+def split_pickup_routes(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty:
+        return df.copy(), df.copy()
+
+    hub_series = df["Hub"].fillna("").astype(str).str.strip().str.upper()
+    if "Route_type" in df.columns:
+        route_type_series = df["Route_type"].fillna("").astype(str).str.strip().str.lower()
+    else:
+        route_type_series = pd.Series("", index=df.index)
+    pickup_mask = hub_series.eq("PU") | route_type_series.eq("pickup")
+
+    pickup_df = df.loc[pickup_mask].copy()
+    non_pickup_df = df.loc[~pickup_mask].copy()
+    return non_pickup_df, pickup_df
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -826,13 +868,14 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
     df.loc[df["month"] == "NaT", "month"] = "未知"
+    non_pickup_df, _ = split_pickup_routes(df)
 
     metrics: list[dict[str, Any]] = []
     chart_rows: list[dict[str, Any]] = []
 
-    df["ofd_to_delivered_hours"] = (df["delivered_dt"] - df["ofd_dt"]).dt.total_seconds() / 3600
-    ofd_present_mask = df["out_for_delivery_time"].notna() & df["out_for_delivery_time"].astype(str).str.strip().ne("")
-    ofd_base = df[ofd_present_mask].copy()
+    non_pickup_df["ofd_to_delivered_hours"] = (non_pickup_df["delivered_dt"] - non_pickup_df["ofd_dt"]).dt.total_seconds() / 3600
+    ofd_present_mask = non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne("")
+    ofd_base = non_pickup_df[ofd_present_mask].copy()
 
     for threshold in [24, 48, 72]:
         within = ofd_base[
@@ -1207,8 +1250,9 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
-    delivered_detail_df = result_df.loc[
-        result_df["out_for_delivery_time"].notna() & result_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
+    non_pickup_df, _ = split_pickup_routes(result_df)
+    delivered_detail_df = non_pickup_df.loc[
+        non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
         [
             "trakcing_id",
             "Region",
@@ -1824,6 +1868,8 @@ def main() -> None:
             & (filtered_df["_ofd_dt"].dt.date < ofd_end_exclusive)
         ].drop(columns=["_ofd_dt"])
 
+        non_pickup_filtered_df, pickup_filtered_df = split_pickup_routes(filtered_df)
+
         layout_mode = st.radio(
             tr("layout_mode_label"),
             options=["detailed", "compact"],
@@ -1864,7 +1910,31 @@ def main() -> None:
         else:
             st.dataframe(invalid_route_df, use_container_width=True)
 
-        delivered_df = filtered_df[filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
+        st.subheader(tr("pickup_section"))
+        if pickup_filtered_df.empty:
+            st.info(tr("pickup_empty"))
+        else:
+            pickup_display_cols = [
+                "trakcing_id",
+                "Region",
+                "State",
+                "Driver",
+                "Hub",
+                "Contractor",
+                "Route_name",
+                "out_for_delivery_time",
+                "delivered_time",
+            ]
+            pickup_display_df = pickup_filtered_df[[c for c in pickup_display_cols if c in pickup_filtered_df.columns]].copy()
+            st.dataframe(pickup_display_df, use_container_width=True)
+            st.download_button(
+                tr("download_pickup"),
+                data=pickup_display_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"pickup_routes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+            )
+
+        delivered_df = non_pickup_filtered_df[non_pickup_filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
             delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
             delivered_df = delivered_df.sort_values(by=["_delivered_dt", "trakcing_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
@@ -1897,4 +1967,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
