@@ -229,7 +229,7 @@ I18N = {
         "avg_daily_share": "Avg Daily Share",
         "scope": "Scope",
         "nationwide": "Nationwide",
-        "customer_summary_empty": "No customer/address data under current filters.",,
+        "customer_summary_empty": "No customer/address data under current filters.",
         "all": "ALL",
         "success_count": "Success Count",
         "fail_count": "Failure Count",
@@ -2367,6 +2367,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
