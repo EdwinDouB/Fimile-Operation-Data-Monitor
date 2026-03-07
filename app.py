@@ -856,6 +856,20 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or any(col not in df.columns for col in required_columns):
         return pd.DataFrame(columns=output_columns)
 
+    work_df = df[required_columns].copy()
+    for col in ["sender_company", "sender_province", "sender_city", "sender_address"]:
+        work_df[col] = work_df[col].fillna("").astype(str).str.strip()
+
+    work_df["shipping_address"] = (
+        work_df["sender_province"]
+        + " "
+        + work_df["sender_city"]
+        + " "
+        + work_df["sender_address"]
+    ).str.replace(r"\s+", " ", regex=True).str.strip()
+    work_df["_ofd_day"] = pd.to_datetime(work_df["out_for_delivery_time"], errors="coerce").dt.date
+    work_df["_state_group"] = work_df["sender_province"].map(normalize_state)
+
     work_df = work_df[
         (work_df["sender_company"] != "")
         & (~work_df["sender_company"].str.casefold().eq("wyd china"))
@@ -2306,6 +2320,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
