@@ -842,7 +842,7 @@ def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     return df[[col for col in df.columns if col not in EXPORT_EXCLUDED_COLUMNS]].copy()
 
 
-def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame::
+def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
     required_columns = [
         "sender_company",
         "sender_province",
@@ -2306,6 +2306,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
