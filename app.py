@@ -140,12 +140,13 @@ I18N = {
         "ofd_filter_start": "出库配送时间起始日期 (Out for Delivery)",
         "ofd_filter_end": "出库配送时间结束日期（不含当天） (Out for Delivery, Exclusive)",
         "apply_ofd_filter": "应用出库配送时间筛选",
-        "customer_summary_section": "客户与收货地址占比",
+        "customer_summary_section": "取货仓库分布",
         "customer_name": "客户名",
+        "pickup_warehouse": "取货仓库",
         "state_group": "州",
         "shipping_address": "收货地址",
         "package_count": "包裹数",
-        "download_customer_summary": "下载客户与收货地址表格",
+        "download_customer_summary": "下载取货仓库表格",
         "scope": "范围",
         "nationwide": "全美",
         "customer_summary_empty": "当前筛选条件下暂无客户地址数据。",
@@ -221,12 +222,13 @@ I18N = {
         "ofd_filter_start": "Out for Delivery Start Date",
         "ofd_filter_end": "Out for Delivery End Date (Exclusive)",
         "apply_ofd_filter": "Apply Out for Delivery date filter",
-        "customer_summary_section": "Customer & Shipping Address Share",
+        "customer_summary_section": "Pickup Warehouse Distribution",
         "customer_name": "Customer",
+        "pickup_warehouse": "Pickup Warehouse",
         "state_group": "State",
         "shipping_address": "Shipping Address",
         "package_count": "Package Count",
-        "download_customer_summary": "Download customer & shipping table",
+        "download_customer_summary": "Download pickup warehouse table",
         "scope": "Scope",
         "nationwide": "Nationwide",
         "customer_summary_empty": "No customer/address data under current filters.",
@@ -852,7 +854,7 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         "trakcing_id",
     ]
 
-    output_columns = [tr("customer_name"), tr("state_group"), tr("shipping_address"), tr("package_count")]
+    output_columns = [tr("pickup_warehouse"), tr("state_group"), tr("package_count")]
     if df.empty or any(col not in df.columns for col in required_columns):
         return pd.DataFrame(columns=output_columns)
 
@@ -880,19 +882,17 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=output_columns)
 
     summary = (
-        work_df.groupby(["_state_group", "sender_company"], as_index=False)
+        work_df.groupby(["_state_group", "shipping_address"], as_index=False)
         .agg(
             package_count=("trakcing_id", "count"),
-            shipping_address=("shipping_address", lambda s: "；".join(sorted({addr for addr in s if addr}))),
         )
-        .sort_values(by=["_state_group", "package_count", "sender_company"], ascending=[True, False, True])
+        .sort_values(by=["_state_group", "package_count", "shipping_address"], ascending=[True, False, True])
     )
 
     return summary.rename(
         columns={
             "_state_group": tr("state_group"),
-            "sender_company": tr("customer_name"),
-            "shipping_address": tr("shipping_address"),
+            "shipping_address": tr("pickup_warehouse"),
             "package_count": tr("package_count"),
         }
     )[output_columns]
@@ -2320,6 +2320,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
