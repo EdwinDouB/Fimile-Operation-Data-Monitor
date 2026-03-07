@@ -854,7 +854,12 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         "trakcing_id",
     ]
 
-    output_columns = [tr("pickup_warehouse"), tr("state_group"), tr("package_count")]
+    output_columns = [
+        tr("customer_name"),
+        tr("pickup_warehouse"),
+        tr("state_group"),
+        tr("package_count"),
+    ]
     if df.empty or any(col not in df.columns for col in required_columns):
         return pd.DataFrame(columns=output_columns)
 
@@ -882,15 +887,19 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=output_columns)
 
     summary = (
-        work_df.groupby(["_state_group", "shipping_address"], as_index=False)
+        work_df.groupby(["_state_group", "sender_company", "shipping_address"], as_index=False)
         .agg(
             package_count=("trakcing_id", "count"),
         )
-        .sort_values(by=["_state_group", "package_count", "shipping_address"], ascending=[True, False, True])
+        .sort_values(
+            by=["_state_group", "sender_company", "package_count", "shipping_address"],
+            ascending=[True, True, False, True],
+        )
     )
 
     return summary.rename(
         columns={
+            "sender_company": tr("customer_name"),
             "_state_group": tr("state_group"),
             "shipping_address": tr("pickup_warehouse"),
             "package_count": tr("package_count"),
@@ -2320,6 +2329,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
