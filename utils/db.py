@@ -1,22 +1,9 @@
 from utils.utils import *
 import streamlit as st
 from datetime import date
-from importlib import import_module
 
-
-def _safe_load_dotenv() -> bool:
-    """Load .env if python-dotenv is available; silently continue otherwise."""
-    try:
-        dotenv_module = import_module("dotenv")
-        load_dotenv = getattr(dotenv_module, "load_dotenv", None)
-        if callable(load_dotenv):
-            return bool(load_dotenv())
-    except Exception:
-        return False
-    return False
-
-
-_safe_load_dotenv()
+from dotenv import load_dotenv
+load_dotenv()
 
 # ---- MySQL (read from env; DO NOT hardcode secrets) ----
 MYSQL_HOST = read_config("MYSQL_HOST", "")
