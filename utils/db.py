@@ -1,4 +1,4 @@
-from utils import *
+from utils.utils import *
 import streamlit as st
 from datetime import date
 

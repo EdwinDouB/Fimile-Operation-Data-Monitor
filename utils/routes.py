@@ -4,8 +4,8 @@ import os
 import io 
 import re 
 
-from utils import *
-from constants import * 
+from utils.utils import *
+from utils.constants import * 
 
 # How many POD images to export per tracking_id (each image can have its own quality.feedback/score)
 POD_IMAGE_EXPORT_N = int(os.getenv("POD_IMAGE_EXPORT_N", "5"))

@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 from typing import Any
 
-from constants import * 
+from utils.constants import * 
 
 def read_config(name: str, default: str = "") -> str:
     """Read config from env first, then Streamlit secrets."""

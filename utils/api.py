@@ -1,4 +1,4 @@
-from utils import *
+from utils.utils import *
 import requests
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any

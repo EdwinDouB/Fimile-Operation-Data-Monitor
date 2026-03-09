@@ -2,12 +2,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from threading import local
 
-from utils import *
-from db import * 
-from routes import *
-from report import * 
-from api import * 
-from constants import * 
+from utils.utils import *
+from utils.db import * 
+from utils.routes import *
+from utils.report import * 
+from utils.api import * 
+from utils.constants import * 
 
 import pandas as pd
 import requests
