@@ -11,7 +11,6 @@ MYSQL_DATABASE = read_config("MYSQL_DATABASE", "")
 
 DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
 
-
 def _require_db_env() -> None:
     missing = []
     if not MYSQL_HOST:
