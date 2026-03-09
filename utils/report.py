@@ -68,13 +68,16 @@ def build_kpi_report_payload(
         within = df[
             df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)
         ]
-        metric_name = f"<{threshold}h 上网率"
+        metric_name = t("metric_scan_threshold", threshold=threshold)
         hit_count = len(within)
         miss_count = max(total_count - hit_count, 0)
         metrics.append(
             {
-                "分类": "12/24/48/72 小时上网率（提货 -> 上网）",
+                "分类": t("section_scan_rate"),
+                "分类key": "section_scan_rate",
                 "指标": metric_name,
+                "指标key": "metric_scan_threshold",
+                "threshold": threshold,
                 "命中": hit_count,
                 "总数": total_count,
                 "占比": rate(hit_count, total_count),
@@ -82,8 +85,18 @@ def build_kpi_report_payload(
         )
         chart_rows.extend(
             [
-                {"图表": metric_name, "分类": f"<{threshold}h上网", "数量": hit_count, "占比": rate(hit_count, total_count)},
-                {"图表": metric_name, "分类": f">={threshold}h或未上网", "数量": miss_count, "占比": rate(miss_count, total_count)},
+                {
+                    "图表": metric_name,
+                    "分类": t("label_scan_hit", threshold=threshold),
+                    "数量": hit_count,
+                    "占比": rate(hit_count, total_count),
+                },
+                {
+                    "图表": metric_name,
+                    "分类": t("label_scan_miss", threshold=threshold),
+                    "数量": miss_count,
+                    "占比": rate(miss_count, total_count),
+                },
             ]
         )
 
