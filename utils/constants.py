@@ -32,6 +32,8 @@ OUTPUT_COLUMNS = [
 I18N = {
     "zh": {
         "language_label": "语言 / Language",
+        "language_zh": "中文",
+        "language_en": "English",
         "app_title": "Fimile美区运单运营数据分析系统",
         "version": "版本号：{version}",
         "route_info": "Driver / Hub / Contractor 将从 Route Name 自动解析：HUB-路区号-日期-DSP-司机名",
@@ -113,7 +115,9 @@ I18N = {
         "lost_no_scan": "没有 Last Scan 数据，无法计算月丢包率。",
     },
     "en": {
-        "language_label": "语言 / Language",
+        "language_label": "Language",
+        "language_zh": "Chinese",
+        "language_en": "English",
         "app_title": "Fimile US Shipment Operations Dashboard",
         "version": "Version: {version}",
         "route_info": "Driver / Hub / Contractor are auto-parsed from Route Name: HUB-Route-Date-DSP-Driver",
