@@ -1,4 +1,47 @@
-from utils.utils import *
+
+
+import os
+import pandas as pd
+import streamlit as st
+
+from utils.constants import I18N
+
+
+def read_config(key: str, default: str = "") -> str:
+    """Read runtime config from Streamlit secrets first, then environment variables."""
+    value = None
+    if hasattr(st, "secrets"):
+        try:
+            value = st.secrets.get(key)
+        except Exception:
+            value = None
+
+    if value is None or str(value).strip() == "":
+        value = os.getenv(key, default)
+    return str(value)
+
+
+def tr(key: str, **kwargs) -> str:
+    lang = st.session_state.get("lang", "zh")
+    text = I18N.get(lang, I18N["zh"]).get(key, key)
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except Exception:
+            return text
+    return text
+
+
+def rate(hit: int | float, total: int | float) -> float:
+    if not total:
+        return 0.0
+    return float(hit) / float(total)
+
+
+def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.to_datetime(pd.Series([pd.NaT] * len(df)), errors="coerce")
+    return pd.to_datetime(df[column], errors="coerce")
 import base64
 import json
 import requests
