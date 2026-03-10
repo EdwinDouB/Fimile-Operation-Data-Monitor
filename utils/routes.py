@@ -29,13 +29,18 @@ REGION_BY_STATE = {
     "FL": "EA",
 }
 
-STATE_ALIAS = {
-    "NY": "NJ",
-}
+STATE_ALIAS = {}
 
 HUB_BY_STATE = {
     "CA": "ONT",
+    "IL": "WDR",
+    "FL": "MIA",
+    "NJ": "EDS",
+    "NY": "EDS",
+    "TX": "HOU",
+    "GA": "ATL",
 }
+
 
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
