@@ -5,24 +5,35 @@ from datetime import date
 from dotenv import load_dotenv
 load_dotenv()
 
-# ---- MySQL (read from env; DO NOT hardcode secrets) ----
-MYSQL_HOST = read_config("MYSQL_HOST", "")
-MYSQL_PORT = int(read_config("MYSQL_PORT", "3306"))
-MYSQL_USERNAME = read_config("MYSQL_USERNAME", "")
-MYSQL_PASSWORD = read_config("MYSQL_PASSWORD", "")
-MYSQL_DATABASE = read_config("MYSQL_DATABASE", "")
+def _read_with_aliases(*names: str, default: str = "") -> str:
+    for name in names:
+        value = read_config(name, "")
+        if value:
+            return value
+    return default
+
+
+def _load_mysql_config() -> dict[str, str | int]:
+    return {
+        "host": _read_with_aliases("MYSQL_HOST", "DB_HOST"),
+        "port": int(_read_with_aliases("MYSQL_PORT", "DB_PORT", default="3306")),
+        "username": _read_with_aliases("MYSQL_USERNAME", "MYSQL_USER", "DB_USERNAME", "DB_USER"),
+        "password": _read_with_aliases("MYSQL_PASSWORD", "MYSQL_PASS", "DB_PASSWORD"),
+        "database": _read_with_aliases("MYSQL_DATABASE", "MYSQL_DB", "DB_DATABASE", "DB_NAME"),
+    }
 
 DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
 
 def _require_db_env() -> None:
+    config = _load_mysql_config()
     missing = []
-    if not MYSQL_HOST:
+    if not config["host"]:
         missing.append("MYSQL_HOST")
-    if not MYSQL_USERNAME:
+    if not config["username"]:
         missing.append("MYSQL_USERNAME")
-    if not MYSQL_PASSWORD:
+    if not config["password"]:
         missing.append("MYSQL_PASSWORD")
-    if not MYSQL_DATABASE:
+    if not config["database"]:
         missing.append("MYSQL_DATABASE")
     if missing:
         raise RuntimeError(f"MySQL 环境变量未配置：{', '.join(missing)}")
@@ -44,12 +55,13 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
     if end_date < start_date:
         return []
 
+    config = _load_mysql_config()
     conn = pymysql.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USERNAME,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
+        host=str(config["host"]),
+        port=int(config["port"]),
+        user=str(config["username"]),
+        password=str(config["password"]),
+        database=str(config["database"]),
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
@@ -96,12 +108,13 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     if not tracking_ids_clean:
         return {}
 
+    config = _load_mysql_config()
     conn = pymysql.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USERNAME,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
+        host=str(config["host"]),
+        port=int(config["port"]),
+        user=str(config["username"]),
+        password=str(config["password"]),
+        database=str(config["database"]),
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
@@ -127,8 +140,7 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
                     for row in rows:
                         tracking_number = str(row.get("tracking_number") or "").strip()
                         if not tracking_number:
-                            continue
-                        receive_province_map[tracking_number] = str(row.get("receive_province") or "").strip()
+@@ -132,56 +145,57 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     finally:
         conn.close()
 
@@ -154,12 +166,13 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     if not tracking_ids_clean:
         return {}
 
+    config = _load_mysql_config()
     conn = pymysql.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USERNAME,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
+        host=str(config["host"]),
+        port=int(config["port"]),
+        user=str(config["username"]),
+        password=str(config["password"]),
+        database=str(config["database"]),
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
@@ -185,14 +198,3 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
                     for row in rows:
                         tracking_number = str(row.get("tracking_number") or "").strip()
                         if not tracking_number:
-                            continue
-                        sender_info_map[tracking_number] = {
-                            "sender_company": str(row.get("sender_company") or "").strip(),
-                            "sender_province": str(row.get("sender_province") or "").strip(),
-                            "sender_city": str(row.get("sender_city") or "").strip(),
-                            "sender_address": str(row.get("sender_address") or "").strip(),
-                        }
-    finally:
-        conn.close()
-
-    return sender_info_map
