@@ -89,6 +89,7 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
         conn.close()
 
 
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     """
@@ -99,7 +100,7 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
 
     if not tracking_ids:
         return {}
@@ -140,12 +141,12 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
                     for row in rows:
                         tracking_number = str(row.get("tracking_number") or "").strip()
                         if not tracking_number:
-@@ -132,56 +145,57 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
+                            continue
+                        receive_province_map[tracking_number] = str(row.get("receive_province") or "").strip()
     finally:
         conn.close()
 
     return receive_province_map
-
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
@@ -157,7 +158,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
 
     if not tracking_ids:
         return {}
@@ -198,3 +199,14 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
                     for row in rows:
                         tracking_number = str(row.get("tracking_number") or "").strip()
                         if not tracking_number:
+                            continue
+                        sender_info_map[tracking_number] = {
+                            "sender_company": str(row.get("sender_company") or "").strip(),
+                            "sender_province": str(row.get("sender_province") or "").strip(),
+                            "sender_city": str(row.get("sender_city") or "").strip(),
+                            "sender_address": str(row.get("sender_address") or "").strip(),
+                        }
+    finally:
+        conn.close()
+
+    return sender_info_map
