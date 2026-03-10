@@ -33,6 +33,11 @@ STATE_ALIAS = {
     "NY": "NJ",
 }
 
+HUB_BY_STATE = {
+    "CA": "ONT",
+}
+
+
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -88,11 +93,24 @@ def is_valid_hub_name(hub: str) -> bool:
 
 
 def is_valid_contractor_name(contractor: str) -> bool:
-    """Contractor must be exactly 2 or 3 letters (A-Z)."""
-    return bool(re.fullmatch(r"[A-Za-z]{2,3}", str(contractor or "").strip()))
+    """Contractor supports 2-5 alphanumerics and must contain at least one letter."""
+    text = re.sub(r"[^A-Za-z0-9]", "", str(contractor or "").strip().upper())
+    if not re.fullmatch(r"[A-Z0-9]{2,5}", text):
+        return False
+    return bool(re.search(r"[A-Z]", text))
 
 
-def parse_route_identity(route_name: str) -> dict[str, str]:
+def infer_hub_from_state(state: str) -> str:
+    normalized_state = normalize_state(state)
+    return HUB_BY_STATE.get(normalized_state, "")
+
+
+def looks_like_driver_token(token: str) -> bool:
+    text = str(token or "").strip().upper()
+    return bool(re.fullmatch(r"[A-Z]{4,}", text))
+
+
+def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str, str]:
     """Parse route format: HUB-路区号-日期-DSP-司机名.
 
     Be tolerant to mixed separators and minor format issues.
@@ -106,7 +124,12 @@ def parse_route_identity(route_name: str) -> dict[str, str]:
     contractor_idx = -1
 
     for idx in range(len(parts) - 1, 0, -1):
-        candidate = parts[idx].strip().upper()
+        raw_candidate = parts[idx].strip().upper()
+        candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
+        if "/" in raw_candidate:
+            continue
+        if idx == len(parts) - 1 and len(parts) >= 3 and looks_like_driver_token(candidate):
+            continue
         if is_valid_contractor_name(candidate):
             contractor = candidate
             contractor_idx = idx
@@ -121,7 +144,7 @@ def parse_route_identity(route_name: str) -> dict[str, str]:
 
     hub = parts[0].upper()
     if not is_valid_hub_name(hub):
-        hub = ""
+        hub = infer_hub_from_state(hub) or infer_hub_from_state(fallback_state)
 
     if contractor and not is_valid_contractor_name(contractor):
         contractor = ""
@@ -470,7 +493,8 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     for idx, row in df.iterrows():
         route_name = str(row.get("success_route") or row.get("failed_route") or "").strip()
-        route_info = parse_route_identity(route_name)
+        fallback_state = str(row.get("sender_province") or row.get("State") or "")
+        route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
         df.at[idx, "Driver"] = route_info["Driver"]
         fallback_hub = str(row.get("Hub") or "").strip().upper()
@@ -562,7 +586,6 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
 def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
     invalid_mask = (
         df["Route_name"].fillna("").astype(str).str.strip().eq("")
-        | df["Driver"].fillna("").astype(str).str.strip().eq("")
         | df["Hub"].fillna("").astype(str).str.strip().eq("")
         | df["Contractor"].fillna("").astype(str).str.strip().eq("")
     )
