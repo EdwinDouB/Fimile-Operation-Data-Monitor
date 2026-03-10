@@ -124,7 +124,13 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     """
     parts = extract_route_parts(route_name)
     if len(parts) < 2:
-        return {"Hub": "", "Contractor": "", "Driver": "", "Route_type": "delivery"}
+        fallback_hub = infer_hub_from_state(fallback_state)
+        return {
+            "Hub": fallback_hub,
+            "Contractor": "",
+            "Driver": "",
+            "Route_type": "pickup" if fallback_hub == "PU" else "delivery",
+        }
 
     contractor = ""
     driver = ""
@@ -500,7 +506,7 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     for idx, row in df.iterrows():
         route_name = str(row.get("success_route") or row.get("failed_route") or "").strip()
-        fallback_state = str(row.get("sender_province") or row.get("State") or "")
+        fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
         df.at[idx, "Driver"] = route_info["Driver"]
