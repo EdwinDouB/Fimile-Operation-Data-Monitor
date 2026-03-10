@@ -43,6 +43,7 @@ HUB_BY_STATE = {
     "CT": "EDS"
 }
 
+KNOWN_HUBS = set(HUB_BY_STATE.values()) | {"PU"}
 
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -110,6 +111,38 @@ def is_valid_contractor_name(contractor: str) -> bool:
 def infer_hub_from_state(state: str) -> str:
     normalized_state = normalize_state(state)
     return HUB_BY_STATE.get(normalized_state, "")
+def _is_single_adjacent_swap(source: str, target: str) -> bool:
+    if len(source) != len(target):
+        return False
+
+    diffs = [idx for idx, (s_char, t_char) in enumerate(zip(source, target)) if s_char != t_char]
+    if len(diffs) != 2:
+        return False
+
+    first, second = diffs
+    return second == first + 1 and source[first] == target[second] and source[second] == target[first]
+
+
+def normalize_hub_name(hub: str, fallback_state: str = "") -> str:
+    hub_text = str(hub or "").strip().upper()
+    if not hub_text:
+        return infer_hub_from_state(fallback_state)
+
+    hub_compact = re.sub(r"[^A-Z]", "", hub_text)
+    if hub_compact in KNOWN_HUBS:
+        return hub_compact
+
+    # Auto-fix common 3-letter typos caused by adjacent letter swaps, e.g. ALT -> ATL.
+    if len(hub_compact) == 3:
+        typo_candidates = [known for known in KNOWN_HUBS if len(known) == 3 and _is_single_adjacent_swap(hub_compact, known)]
+        if len(typo_candidates) == 1:
+            return typo_candidates[0]
+
+    if is_valid_hub_name(hub_compact):
+        return hub_compact
+
+    return infer_hub_from_state(hub_compact) or infer_hub_from_state(fallback_state)
+
 
 
 def looks_like_driver_token(token: str) -> bool:
@@ -155,9 +188,7 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     elif len(parts) >= 2:
         driver = parts[-1].strip().title()
 
-    hub = parts[0].upper()
-    if not is_valid_hub_name(hub):
-        hub = infer_hub_from_state(hub) or infer_hub_from_state(fallback_state)
+    hub = normalize_hub_name(parts[0], fallback_state=fallback_state)
 
     if contractor and not is_valid_contractor_name(contractor):
         contractor = ""
@@ -441,6 +472,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "failed_route": parse_route(event_description(fail_evt)) if fail_evt else "",
         "delivered_time": fmt_dt(delivered_time),
         "success_route": parse_route(event_description(success_evt)) if success_evt else "",
+        "ofd_route": parse_route(event_description(ofd_evt)) if ofd_evt else "",
         "Route_name": "",
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
@@ -505,13 +537,13 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["Route_type"] = ""
 
     for idx, row in df.iterrows():
-        route_name = str(row.get("success_route") or row.get("failed_route") or "").strip()
+        route_name = str(row.get("success_route") or row.get("failed_route") or row.get("ofd_route") or "").strip()
         fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
         df.at[idx, "Driver"] = route_info["Driver"]
-        fallback_hub = str(row.get("Hub") or "").strip().upper()
-        parsed_hub = route_info["Hub"].strip().upper()
+        fallback_hub = normalize_hub_name(row.get("Hub") or "", fallback_state=fallback_state)
+        parsed_hub = normalize_hub_name(route_info["Hub"], fallback_state=fallback_state)
         df.at[idx, "Hub"] = parsed_hub or fallback_hub
         df.at[idx, "Contractor"] = route_info["Contractor"]
         df.at[idx, "Route_type"] = route_info["Route_type"]
