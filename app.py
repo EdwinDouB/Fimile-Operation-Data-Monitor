@@ -185,8 +185,8 @@ def apply_manual_dimension_overrides(df: pd.DataFrame) -> pd.DataFrame:
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     # scan time - created time and check how many hours 
     delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h delivery rate"), None)
-    scan_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h scan rate"), None)
-    lost_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "overall monthly lost rate"), None)
+    pod_compliance_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "POD compliance rate"), None)
+    attempt_24h_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "24h attempt rate"), None)
 
     st.markdown(f"#### {tr('compact_title')}")
     c1, c2, c3 = st.columns(3)
@@ -205,35 +205,35 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
         c1.metric("24h Delivery Rate", "0.00%", "0/0")
         c1.info("24h delivery share: no data available")
 
-    if scan_24h:
-        c2.metric("24h Scan Rate", f"{scan_24h['rate']:.2%}", f"{scan_24h['hit']}/{scan_24h['total']}")
+    if pod_compliance_metric:
+        c2.metric("POD Compliance Rate", f"{pod_compliance_metric['rate']:.2%}", f"{pod_compliance_metric['hit']}/{pod_compliance_metric['total']}")
         render_percentage_pie(
-            title="24h Scan Share",
-            hit_count=int(scan_24h["hit"]),
-            total_count=int(scan_24h["total"]),
-            hit_label="<24h scanned",
-            miss_label=">=24h or unscanned",
-            chart_key="compact_scan_24h",
+            title="POD Compliance Share",
+            hit_count=int(pod_compliance_metric["hit"]),
+            total_count=int(pod_compliance_metric["total"]),
+            hit_label="POD compliant",
+            miss_label="Not POD compliant",
+            chart_key="compact_pod_compliance",
             container=c2,
         )
     else:
-        c2.metric("24h Scan Rate", "0.00%", "0/0")
-        c2.info("24h scan share: no data available")
+        c2.metric("POD Compliance Rate", "0.00%", "0/0")
+        c2.info("POD compliance share: no data available")
 
-    if lost_metric:
-        c3.metric("Lost Rate", f"{lost_metric['rate']:.2%}", f"{lost_metric['hit']}/{lost_metric['total']}")
+    if attempt_24h_metric:
+        c3.metric("24h Attempt Rate", f"{attempt_24h_metric['rate']:.2%}", f"{attempt_24h_metric['hit']}/{attempt_24h_metric['total']}")
         render_percentage_pie(
-            title="Lost Share",
-            hit_count=int(lost_metric["hit"]),
-            total_count=int(lost_metric["total"]),
-            hit_label="Lost",
-            miss_label="Not lost",
-            chart_key="compact_lost_rate",
+            title="24h Attempt Share",
+            hit_count=int(attempt_24h_metric["hit"]),
+            total_count=int(attempt_24h_metric["total"]),
+            hit_label="Attempted or delivered within 24h",
+            miss_label="No attempt/delivery within 24h",
+            chart_key="compact_attempt_24h",
             container=c3,
         )
     else:
-        c3.metric("Lost Rate", "0.00%", "0/0")
-        c3.info("Lost share: no data available")
+        c3.metric("24h Attempt Rate", "0.00%", "0/0")
+        c3.info("24h attempt share: no data available")
 
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
@@ -1030,5 +1030,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
