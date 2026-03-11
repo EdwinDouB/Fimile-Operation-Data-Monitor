@@ -6,6 +6,122 @@ from typing import Any
 import pandas as pd
 import io 
 
+
+def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
+    if detail_df is None or detail_df.empty:
+        return pd.DataFrame(columns=["Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate"])
+
+    source_df = detail_df.copy()
+    if "out_for_delivery_time" in source_df.columns:
+        source_df["ofd_dt"] = to_datetime_series(source_df, "out_for_delivery_time")
+    else:
+        source_df["ofd_dt"] = pd.NaT
+    if "delivered_time" in source_df.columns:
+        source_df["delivered_dt"] = to_datetime_series(source_df, "delivered_time")
+    else:
+        source_df["delivered_dt"] = pd.NaT
+
+    source_df["ofd_to_delivered_hours"] = (source_df["delivered_dt"] - source_df["ofd_dt"]).dt.total_seconds() / 3600
+    for threshold in [24, 48, 72]:
+        source_df[f"within_{threshold}h"] = (
+            source_df["delivered_dt"].notna()
+            & (source_df["ofd_to_delivered_hours"] >= 0)
+            & (source_df["ofd_to_delivered_hours"] < threshold)
+        )
+
+    def _append_row(rows: list[dict[str, Any]], dimension: str, sub_df: pd.DataFrame) -> None:
+        total_count = len(sub_df)
+        row = {"Dimension": dimension, "Sample Count": total_count}
+        for threshold in [24, 48, 72]:
+            hit = int(sub_df[f"within_{threshold}h"].sum()) if total_count > 0 else 0
+            row[f"<{threshold}h Hit"] = hit
+            row[f"<{threshold}h Delivery Rate"] = rate(hit, total_count)
+        rows.append(row)
+
+    rows: list[dict[str, Any]] = []
+    _append_row(rows, "Overall", source_df)
+
+    if "Region" in source_df.columns:
+        for region in sorted(source_df["Region"].fillna("Unknown Region").astype(str).str.strip().replace("", "Unknown Region").unique()):
+            region_df = source_df[source_df["Region"].fillna("Unknown Region").astype(str).str.strip().replace("", "Unknown Region") == region]
+            _append_row(rows, region, region_df)
+
+            if "Hub" in source_df.columns:
+                hub_series = region_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+                for hub in sorted(hub_series.unique()):
+                    hub_df = region_df[hub_series == hub]
+                    _append_row(rows, f"  {hub}", hub_df)
+
+    return pd.DataFrame(rows)
+
+
+def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
+    if detail_df.empty:
+        return pd.DataFrame()
+
+    hub_df = detail_df[detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub") == hub_name].copy()
+    if hub_df.empty:
+        return pd.DataFrame()
+
+    hub_df["ofd_dt"] = to_datetime_series(hub_df, "out_for_delivery_time")
+    hub_df["delivered_dt"] = to_datetime_series(hub_df, "delivered_time")
+    hub_df["ofd_to_delivered_hours"] = (hub_df["delivered_dt"] - hub_df["ofd_dt"]).dt.total_seconds() / 3600
+    for threshold in [24, 48, 72]:
+        hub_df[f"within_{threshold}h"] = (
+            hub_df["delivered_dt"].notna()
+            & (hub_df["ofd_to_delivered_hours"] >= 0)
+            & (hub_df["ofd_to_delivered_hours"] < threshold)
+        )
+
+    rows: list[dict[str, Any]] = []
+
+    def _append_row(dimension: str, sub_df: pd.DataFrame) -> None:
+        total_count = len(sub_df)
+        row = {"Dimension": dimension, "Sample Count": total_count}
+        for threshold in [24, 48, 72]:
+            hit = int(sub_df[f"within_{threshold}h"].sum()) if total_count > 0 else 0
+            row[f"<{threshold}h Hit"] = hit
+            row[f"<{threshold}h Delivery Rate"] = rate(hit, total_count)
+        rows.append(row)
+
+    _append_row(hub_name, hub_df)
+    contractor_series = hub_df["Contractor"].fillna("Unknown Contractor").astype(str).str.strip().replace("", "Unknown Contractor")
+    for contractor in sorted(contractor_series.unique()):
+        _append_row(f"  {contractor}", hub_df[contractor_series == contractor])
+
+    return pd.DataFrame(rows)
+
+
+def _style_overview_worksheet(worksheet, table_df: pd.DataFrame, start_row: int, workbook) -> None:
+    if table_df.empty:
+        return
+
+    header_fmt = workbook.add_format({"bold": True, "bg_color": "#1f4e78", "font_color": "#ffffff", "border": 1})
+    level_colors = {0: "#f3f4f6", 1: "#dbeafe", 2: "#e0f2fe", 3: "#ecfccb"}
+    for col_idx, col_name in enumerate(table_df.columns):
+        worksheet.write(start_row, col_idx, col_name, header_fmt)
+
+    for ridx, (_, row) in enumerate(table_df.iterrows(), start=1):
+        dimension = str(row.get("Dimension", ""))
+        leading_spaces = len(dimension) - len(dimension.lstrip(" "))
+        level = min(3, leading_spaces // 2)
+        bg = level_colors.get(level, "#ffffff")
+        row_fmt = workbook.add_format({"bg_color": bg, "border": 1})
+        row_rate_fmt = workbook.add_format({"bg_color": bg, "border": 1, "num_format": "0.00%"})
+        for cidx, val in enumerate(row.tolist()):
+            col_name = table_df.columns[cidx]
+            if "Rate" in col_name:
+                worksheet.write(start_row + ridx, cidx, val, row_rate_fmt)
+            elif isinstance(val, (int, float)):
+                worksheet.write(start_row + ridx, cidx, val, row_fmt)
+            else:
+                worksheet.write(start_row + ridx, cidx, str(val), row_fmt)
+
+    worksheet.set_column(0, 0, 28)
+    worksheet.set_column(1, 7, 18)
+
+
+
 def build_kpi_report_payload(
     result_df: pd.DataFrame,
     fetch_reference_time: datetime | None = None,
@@ -197,7 +313,7 @@ def build_kpi_report_payload(
         "monthly_lost": monthly_lost,
     }
 
-def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFrame | None = None) -> bytes:
+def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFrame | None = None, layout_mode: str = "detailed") -> bytes:
     output = io.BytesIO()
     metrics_df = pd.DataFrame(kpi_payload["metrics"])
     chart_df = pd.DataFrame(kpi_payload["charts"])
@@ -225,6 +341,25 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
             detail_ws.set_column(0, max(len(detail_df.columns) - 1, 0), 20)
 
         row_cursor = 0
+        col_cursor = 0
+        max_cols = 3
+        chart_order = list(chart_df["chart"].dropna().astype(str).unique())
+        def _chart_group_key(name: str) -> int:
+            lower = name.lower()
+            if "delivery" in lower:
+                return 0
+            if "scan" in lower:
+                return 1
+            if "pod" in lower or "attempt" in lower:
+                return 2
+            if "lost" in lower:
+                return 3
+            return 4
+
+        chart_order = sorted(chart_order, key=lambda n: (_chart_group_key(n), chart_order.index(n)))
+
+        for chart_name in chart_order:
+            group = chart_df[chart_df["chart"] == chart_name]
         for chart_name, group in chart_df.groupby("chart", sort=False):
             rows = group.index.to_list()
             if not rows:
@@ -242,7 +377,52 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
             )
             pie.set_title({"name": chart_name})
             pie.set_style(10)
-            chart_ws.insert_chart(row_cursor, 0, pie, {"x_scale": 1.2, "y_scale": 1.2})
-            row_cursor += 18
 
+            chart_ws.insert_chart(row_cursor, col_cursor, pie, {"x_scale": 1.0, "y_scale": 1.0})
+            col_cursor += 8
+            if col_cursor >= max_cols * 8:
+                col_cursor = 0
+                row_cursor += 16
+
+        if layout_mode == "detailed" and detail_df is not None and not detail_df.empty:
+            overview_ws = workbook.add_worksheet("overview")
+            overview_ws.write(0, 0, "KPI Charts")
+
+            chart_row, chart_col = 1, 0
+            for chart_name in chart_order:
+                group = chart_df[chart_df["chart"] == chart_name]
+                rows = group.index.to_list()
+                if not rows:
+                    continue
+                excel_rows = [r + 1 for r in rows]
+                pie = workbook.add_chart({"type": "pie"})
+                pie.add_series(
+                    {
+                        "name": chart_name,
+                        "categories": ["kpi_chart_data", excel_rows[0], 1, excel_rows[-1], 1],
+                        "values": ["kpi_chart_data", excel_rows[0], 2, excel_rows[-1], 2],
+                        "data_labels": {"percentage": True, "category": True},
+                    }
+                )
+                pie.set_title({"name": chart_name})
+                pie.set_style(10)
+                overview_ws.insert_chart(chart_row, chart_col, pie, {"x_scale": 1.0, "y_scale": 1.0})
+                chart_col += 8
+                if chart_col >= max_cols * 8:
+                    chart_col = 0
+                    chart_row += 16
+
+            overview_table = _build_detailed_overview_table(detail_df)
+            table_start_row = chart_row + 17
+            _style_overview_worksheet(overview_ws, overview_table, table_start_row, workbook)
+
+            hub_series = detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+            for hub_name in sorted(hub_series.unique()):
+                hub_table = _build_hub_table(detail_df, hub_name)
+                if hub_table.empty:
+                    continue
+                sheet_name = f"HUB_{hub_name}"[:31]
+                hub_ws = workbook.add_worksheet(sheet_name)
+                _style_overview_worksheet(hub_ws, hub_table, 0, workbook)
+                
     return output.getvalue()
