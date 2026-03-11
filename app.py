@@ -1091,7 +1091,12 @@ def main() -> None:
         )
         report_detail_df = build_detailed_report_detail_df(filtered_df) if layout_mode == "detailed" else export_df
         try:
-            kpi_report_data = kpi_report_to_excel_bytes(report_payload, report_detail_df, layout_mode=layout_mode)
+            kpi_report_data = kpi_report_to_excel_bytes(
+                report_payload,
+                report_detail_df,
+                layout_mode=layout_mode,
+                source_df=filtered_df,
+            )
             c_report.download_button(
                 tr("download_report"),
                 data=kpi_report_data,
@@ -1107,5 +1112,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
