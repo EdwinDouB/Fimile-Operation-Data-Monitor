@@ -656,14 +656,10 @@ def main() -> None:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
         st.session_state["language"] = "zh"
-    if "ofd_filter_start" not in st.session_state:
-        st.session_state["ofd_filter_start"] = date.today() - timedelta(days=7)
-    if "ofd_filter_end" not in st.session_state:
-        st.session_state["ofd_filter_end"] = date.today()
     if "hide_unknown_dimensions" not in st.session_state:
         st.session_state["hide_unknown_dimensions"] = False
-    if "apply_ofd_filter" not in st.session_state:
-        st.session_state["apply_ofd_filter"] = True
+    if "date_filter_type" not in st.session_state:
+        st.session_state["date_filter_type"] = "created"
     if "unknown_contractor_overrides" not in st.session_state:
         st.session_state["unknown_contractor_overrides"] = {}
     if "contractor_override_hub" not in st.session_state:
@@ -679,78 +675,47 @@ def main() -> None:
     )
 
     st.subheader(tr("input_section"))
-    mode = st.radio(
-        tr("input_mode"),
-        [tr("mode_db"), tr("mode_file"), tr("mode_text"), tr("mode_text_db")],
-        horizontal=True,
+    st.caption(f"{tr('input_mode')}: {tr('mode_db')}")
+
+    date_filter_options = {
+        tr("date_filter_created"): "created",
+        tr("date_filter_delivery"): "delivery",
+    }
+    selected_date_filter = st.selectbox(
+        tr("date_filter_type"),
+        options=list(date_filter_options.keys()),
     )
+    st.session_state["date_filter_type"] = date_filter_options[selected_date_filter]
+
+    c1, c2 = st.columns(2)
+    with c1:
+        start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1))
+    with c2:
+        end_d = st.date_input(tr("end_date"), value=date.today())
 
     raw_ids: list[str] = []
-
-    if mode == tr("mode_db"):
-        c1, c2 = st.columns(2)
-        with c1:
-            start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1))
-        with c2:
-            end_d = st.date_input(tr("end_date"), value=date.today())
-
-        btn = st.button(tr("load_btn"), type="primary")
-        if btn:
-            with st.spinner(tr("loading_db")):
-                try:
+    btn = st.button(tr("load_btn"), type="primary")
+    if btn:
+        with st.spinner(tr("loading_db")):
+            try:
+                if st.session_state.get("date_filter_type") == "delivery":
+                    raw_ids = fetch_tracking_numbers_by_delivery_window(start_d, end_d)
+                else:
                     raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
-                    st.session_state["db_raw_ids"] = raw_ids
-                    if not raw_ids:
-                        st.warning(tr("no_tracking_found"))
-                except Exception as e:
-                    st.error(str(e))
-                    raw_ids = []
-                    st.session_state["db_raw_ids"] = []
+                st.session_state["db_raw_ids"] = raw_ids
+                if not raw_ids:
+                    st.warning(tr("no_tracking_found"))
+            except Exception as e:
+                st.error(str(e))
+                raw_ids = []
+                st.session_state["db_raw_ids"] = []
 
-        if not btn:
-            raw_ids = st.session_state.get("db_raw_ids", [])
+    if not btn:
+        raw_ids = st.session_state.get("db_raw_ids", [])
 
-        if raw_ids:
-            with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
-                st.write(raw_ids[:50])
-
-    elif mode == tr("mode_file"):
-        file = st.file_uploader(tr("upload_file"), type=["csv", "xlsx"])
-        raw_ids = read_uploaded_ids(file)
-
-    elif mode == tr("mode_text"):
-        text = st.text_area(tr("paste_ids"), height=180, key="paste_text_only")
-        raw_ids = split_text_ids(text)
-
-    else:
-        text = st.text_area(tr("paste_ids"), height=180, key="paste_text_with_db")
-        pasted_ids = split_text_ids(text)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1), key="text_db_start_date")
-        with c2:
-            end_d = st.date_input(tr("end_date"), value=date.today(), key="text_db_end_date")
-
-        merge_btn = st.button(tr("load_merge_btn"), type="primary")
-        if merge_btn:
-            with st.spinner(tr("loading_db")):
-                try:
-                    db_raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
-                    st.session_state["db_raw_ids"] = db_raw_ids
-                    if not db_raw_ids:
-                        st.warning(tr("no_tracking_found"))
-                except Exception as e:
-                    st.error(str(e))
-                    st.session_state["db_raw_ids"] = []
-
-        db_raw_ids = st.session_state.get("db_raw_ids", [])
-        raw_ids = pasted_ids + db_raw_ids
-
-        if db_raw_ids:
-            with st.expander(tr("db_preview", count=len(db_raw_ids)), expanded=False):
-                st.write(db_raw_ids[:50])
-
+    if raw_ids:
+        with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
+            st.write(raw_ids[:50])
 
     cleaned, dedup_ids, counter = normalize_tracking_ids(raw_ids, uppercase=False)
     duplicate_ids = [k for k, v in counter.items() if v > 1]
@@ -870,44 +835,6 @@ def main() -> None:
             )
 
         result_df = apply_manual_dimension_overrides(result_df)
-            
-        ofd_series = pd.to_datetime(result_df["out_for_delivery_time"], errors="coerce")
-        ofd_valid_dates = ofd_series.dropna().dt.date
-        if not ofd_valid_dates.empty:
-            default_ofd_start = ofd_valid_dates.min()
-            default_ofd_end = ofd_valid_dates.max()
-        else:
-            default_ofd_start = date.today() - timedelta(days=7)
-            default_ofd_end = date.today()
-
-        current_ofd_start = st.session_state.get("ofd_filter_start", default_ofd_start)
-        current_ofd_end = st.session_state.get("ofd_filter_end", default_ofd_end)
-        current_ofd_start = max(default_ofd_start, min(current_ofd_start, default_ofd_end))
-        current_ofd_end = max(default_ofd_start, min(current_ofd_end, default_ofd_end))
-        if current_ofd_start > current_ofd_end:
-            current_ofd_start = current_ofd_end
-        st.session_state["ofd_filter_start"] = current_ofd_start
-        st.session_state["ofd_filter_end"] = current_ofd_end
-
-        ofd_c1, ofd_c2 = st.columns(2)
-        with ofd_c1:
-            ofd_start_date = st.date_input(
-                tr("ofd_filter_start"),
-                value=current_ofd_start,
-                min_value=default_ofd_start,
-                max_value=default_ofd_end,
-                key="ofd_filter_start",
-            )
-        with ofd_c2:
-            ofd_end_date = st.date_input(
-                tr("ofd_filter_end"),
-                value=current_ofd_end,
-                min_value=default_ofd_start,
-                max_value=default_ofd_end,
-                key="ofd_filter_end",
-            )
-
-        st.checkbox(tr("apply_ofd_filter"), key="apply_ofd_filter")
 
         region_series = result_df["Region"].fillna("").astype(str).str.strip()
         region_options = [tr("all")] + sorted([item for item in region_series.unique().tolist() if item])
@@ -952,9 +879,6 @@ def main() -> None:
         with filter_c5:
             selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
 
-        if ofd_start_date > ofd_end_date:
-            ofd_start_date, ofd_end_date = ofd_end_date, ofd_start_date
-
         filtered_df = result_df.copy()
         if selected_region != tr("all"):
             filtered_df = filtered_df[
@@ -981,18 +905,12 @@ def main() -> None:
             known_mask = (~filtered_df["Hub"].map(is_unknown_dimension_value)) & (~filtered_df["Contractor"].map(is_unknown_dimension_value))
             filtered_df = filtered_df[known_mask]
 
-        
-        if st.session_state.get("apply_ofd_filter", True):
-            filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
-            ofd_start_ts = pd.Timestamp(ofd_start_date)
-            ofd_end_exclusive_ts = pd.Timestamp(ofd_end_date)
-            if ofd_end_exclusive_ts <= ofd_start_ts:
-                ofd_end_exclusive_ts = ofd_start_ts + pd.Timedelta(days=1)
+
+        if st.session_state.get("date_filter_type") == "delivery":
             filtered_df = filtered_df[
-                filtered_df["_ofd_dt"].notna()
-                & (filtered_df["_ofd_dt"] >= ofd_start_ts)
-                & (filtered_df["_ofd_dt"] < ofd_end_exclusive_ts)
-            ].drop(columns=["_ofd_dt"])
+                filtered_df["out_for_delivery_time"].notna()
+                & filtered_df["out_for_delivery_time"].astype(str).str.strip().ne("")
+            ]
 
         non_pickup_filtered_df, pickup_filtered_df = split_pickup_routes(filtered_df)
 
@@ -1112,6 +1030,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
