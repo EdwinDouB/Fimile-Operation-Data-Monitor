@@ -84,6 +84,7 @@ KNOWN_DSP_CONTRACTORS = [
     "NWB",
     "BXI",
     "KAT",
+    "Fedex",
 ]
 
 
