@@ -1,6 +1,6 @@
 from utils.utils import *
 import streamlit as st
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 
 from dotenv import load_dotenv
@@ -46,7 +46,8 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
     # return ["ZX34043383"]
 
     """
-    Query waybill_waybills for tracking_number where created_at is between [start_date, end_date] inclusive.
+    Query waybill_waybills for tracking_number where created_at is between
+    [start_date 00:00:00, end_date 23:59:59.999999] (inclusive by date).
     """
     _require_db_env()
 
@@ -58,6 +59,10 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
 
     if end_date < start_date:
         return []
+
+    start_dt = datetime.combine(start_date, time.min)
+    # Use an exclusive upper-bound at next-day 00:00:00 to avoid dropping rows on end_date.
+    end_exclusive_dt = datetime.combine(end_date + timedelta(days=1), time.min)
 
     config = _load_mysql_config()
     conn = pymysql.connect(
@@ -76,11 +81,11 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
             sql = """
                 SELECT DISTINCT tracking_number
                 FROM waybill_waybills
-                WHERE created_at >= %s AND created_at <= %s
+                WHERE created_at >= %s AND created_at < %s
                 AND tracking_number IS NOT NULL AND tracking_number <> ''
                 ORDER BY tracking_number ASC
             """
-            cur.execute(sql, (start_date, end_date))
+            cur.execute(sql, (start_dt, end_exclusive_dt))
 
             tracking_numbers: list[str] = []
             while True:
