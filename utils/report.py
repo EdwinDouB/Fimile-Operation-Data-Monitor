@@ -30,6 +30,11 @@ def build_kpi_report_payload(
     ofd_present_mask = non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne("")
     ofd_base = non_pickup_df[ofd_present_mask].copy()
 
+    delivered_within_24h = ofd_base[
+        ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < 24)
+    ]
+
+    
     for threshold in [24, 48, 72]:
         within = ofd_base[
             ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
@@ -87,6 +92,8 @@ def build_kpi_report_payload(
             return bool(manual_map[tracking_id])
         return auto_is_pod_compliant(row)
 
+    pod_compliant_mask = delivered_within_24h.apply(_resolve_pod_compliance, axis=1)
+    pod_total_count = len(delivered_within_24h)
     pod_compliant_mask = ofd_base.apply(_resolve_pod_compliance, axis=1)
     pod_total_count = len(ofd_base)
     pod_hit_count = int(pod_compliant_mask.sum())
