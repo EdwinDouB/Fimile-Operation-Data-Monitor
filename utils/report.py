@@ -211,8 +211,10 @@ def _insert_dashboard_charts(
             col.set_title({"name": "12/24/48/72 scan rate"})
             col.set_y_axis({"num_format": "0%", "min": 0, "max": 1})
             worksheet.insert_chart(*chart_positions["12/24/48/72 scan rate"], col, {"x_scale": 1.0, "y_scale": 1.0})
-
-    worksheet.set_column(data_col, data_col + 3, 2, None, {"hidden": True})
+    # Keep chart source data visible. Some spreadsheet viewers (e.g. WPS)
+    # don't plot charts when the source columns are hidden, which makes the
+    # exported charts appear blank.
+    worksheet.set_column(data_col, data_col + 3, 14)
 
 
 
