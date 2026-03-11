@@ -502,8 +502,10 @@ def process_tracking_ids(
     rows_by_id: dict[str, dict[str, str]] = {}
     failures: list[dict[str, str]] = []
 
+    result_columns = OUTPUT_COLUMNS + POD_COLUMNS
+
     if not dedup_ids:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS), failures
+        return pd.DataFrame(columns=result_columns), failures
 
     total = len(dedup_ids)
     completed = 0
@@ -548,7 +550,7 @@ def process_tracking_ids(
             status_text.text(tr("processing", completed=completed, total=total, tracking_id=tracking_id))
 
     ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
-    return pd.DataFrame(ordered_rows, columns=OUTPUT_COLUMNS), failures
+    return pd.DataFrame(ordered_rows, columns=result_columns), failures
 
 def main() -> None:
     st.set_page_config(page_title="Fimile US Shipment Operations Dashboard", layout="wide")
@@ -1030,4 +1032,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
