@@ -4,6 +4,7 @@ from typing import Any
 import os
 import io 
 import re 
+from difflib import SequenceMatcher
 
 from utils.utils import *
 from utils.constants import * 
@@ -61,6 +62,29 @@ HUB_BY_STATE = {
 }
 
 KNOWN_HUBS = set(HUB_BY_STATE.values()) | set(HUB_ALIAS.values()) | {"PU"}
+
+# Existing DSP contractors from route naming convention.
+KNOWN_DSP_CONTRACTORS = [
+    "CBC",
+    "GT",
+    "FME",
+    "BR",
+    "BD",
+    "GW",
+    "DRX",
+    "SLE",
+    "LXE",
+    "YLL",
+    "EOI",
+    "FFI",
+    "EFB",
+    "SEL",
+    "GHH",
+    "MYC",
+    "NWB",
+    "BXI",
+    "KAT",
+]
 
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -146,6 +170,64 @@ def is_valid_contractor_name(contractor: str) -> bool:
 def infer_hub_from_state(state: str) -> str:
     normalized_state = normalize_state(state)
     return HUB_BY_STATE.get(normalized_state, "")
+
+
+
+def normalize_contractor_name(contractor: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(contractor or "").strip().upper())
+
+
+def _edit_distance(source: str, target: str) -> int:
+    if source == target:
+        return 0
+    if not source:
+        return len(target)
+    if not target:
+        return len(source)
+
+    previous = list(range(len(target) + 1))
+    for i, s_char in enumerate(source, start=1):
+        current = [i]
+        for j, t_char in enumerate(target, start=1):
+            insert_cost = current[j - 1] + 1
+            delete_cost = previous[j] + 1
+            replace_cost = previous[j - 1] + (0 if s_char == t_char else 1)
+            current.append(min(insert_cost, delete_cost, replace_cost))
+        previous = current
+    return previous[-1]
+
+
+def match_known_contractor(token: str) -> str:
+    candidate = normalize_contractor_name(token)
+    if not candidate:
+        return ""
+
+    if candidate in KNOWN_DSP_CONTRACTORS:
+        return candidate
+
+    best_match = ""
+    best_score = 0.0
+    best_distance = 10**9
+    for known in KNOWN_DSP_CONTRACTORS:
+        ratio = SequenceMatcher(None, candidate, known).ratio()
+        distance = _edit_distance(candidate, known)
+        if _is_single_adjacent_swap(candidate, known):
+            ratio = max(ratio, 0.9)
+            distance = min(distance, 1)
+        if candidate in known or known in candidate:
+            ratio = max(ratio, 0.85)
+        if ratio > best_score or (ratio == best_score and distance < best_distance):
+            best_score = ratio
+            best_match = known
+            best_distance = distance
+
+    max_distance = 1 if len(best_match) <= 3 else 2
+    if best_distance <= max_distance or best_score >= 0.72:
+        return best_match
+    return ""
+
+
+
 def _is_single_adjacent_swap(source: str, target: str) -> bool:
     if len(source) != len(target):
         return False
@@ -200,12 +282,12 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     """
     parts = extract_route_parts(route_name)
     if len(parts) < 2:
-        fallback_hub = infer_hub_from_state(fallback_state)
+
         return {
-            "Hub": fallback_hub,
+            "Hub": infer_hub_from_state(fallback_state),
             "Contractor": "",
             "Driver": "",
-            "Route_type": "pickup" if fallback_hub == "PU" else "delivery",
+            "Route_type": "pickup" if infer_hub_from_state(fallback_state) == "PU" else "delivery",
         }
 
     contractor = ""
@@ -219,22 +301,23 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
             break
 
     if date_idx >= 0 and date_idx + 1 < len(parts):
-        raw_candidate = parts[date_idx + 1].strip().upper()
-        candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
-        if is_valid_contractor_name(candidate):
+        raw_candidate = parts[date_idx + 1].strip()
+        candidate = match_known_contractor(raw_candidate)
+        if candidate:
             contractor = candidate
             contractor_idx = date_idx + 1
 
     if contractor_idx < 0:
         for idx in range(len(parts) - 1, 0, -1):
             raw_candidate = parts[idx].strip().upper()
-            candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
+            candidate = normalize_contractor_name(raw_candidate)
             if "/" in raw_candidate:
                 continue
             if idx == len(parts) - 1 and len(parts) >= 3 and looks_like_driver_token(candidate):
                 continue
-            if is_valid_contractor_name(candidate):
-                contractor = candidate
+            matched = match_known_contractor(candidate)
+            if matched:
+                contractor = matched
                 contractor_idx = idx
                 break
 
@@ -245,9 +328,9 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     elif len(parts) >= 2:
         driver = parts[-1].strip().title()
 
-    hub = normalize_hub_name(parts[0], fallback_state=fallback_state)
+    hub = infer_hub_from_state(fallback_state)
 
-    if contractor and not is_valid_contractor_name(contractor):
+    if contractor and not match_known_contractor(contractor):
         contractor = ""
 
     route_type = "pickup" if hub == "PU" else "delivery"
@@ -551,9 +634,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         q = img.get("quality")
         if not isinstance(q, dict):
             continue
-        row[f"pod_feedback_{i}"] = str(q.get("feedback") or "")
-        score_val = q.get("score")
-        row[f"pod_score_{i}"] = "" if score_val is None else str(score_val)
+        df.at[idx, "Hub"] = infer_hub_from_state(fallback_state)
 
     return row
 
