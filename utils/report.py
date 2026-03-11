@@ -75,8 +75,8 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
             ]
         )
 
-    pod_compliant_mask = df.apply(auto_is_pod_compliant, axis=1)
-    pod_total_count = len(df)
+    pod_compliant_mask = ofd_base.apply(auto_is_pod_compliant, axis=1)
+    pod_total_count = len(ofd_base)
     pod_hit_count = int(pod_compliant_mask.sum())
     pod_miss_count = max(pod_total_count - pod_hit_count, 0)
     metrics.append(
