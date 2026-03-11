@@ -29,7 +29,20 @@ REGION_BY_HUB = {
     "WDR": "WE",
 }
 
-STATE_ALIAS = {}
+STATE_ALIAS = {
+    "CALIFORNIA": "CA",
+    "ILLINOIS": "IL",
+    "FLORIDA": "FL",
+    "NEWJERSEY": "NJ",
+    "NEW JERSEY": "NJ",
+    "NEWYORK": "NY",
+    "NEW YORK": "NY",
+    "TEXAS": "TX",
+    "GEORGIA": "GA",
+    "PENNSYLVANIA": "PA",
+    "CONNECTICUT": "CT",
+}
+
 
 HUB_ALIAS = {
     "GIA": "MIA",
@@ -554,9 +567,33 @@ def normalize_state(state: str) -> str:
     normalized_state = str(state or "").strip().upper()
     if not normalized_state:
         return ""
+    tokens = [token for token in re.split(r"[^A-Z]+", normalized_state) if token]
+    for token in tokens:
+        if token in HUB_BY_STATE:
+            return token
+        mapped_token = STATE_ALIAS.get(token)
+        if mapped_token:
+            return mapped_token
+
+    for idx in range(len(tokens) - 1):
+        two_token_name = f"{tokens[idx]} {tokens[idx + 1]}"
+        mapped_two_token = STATE_ALIAS.get(two_token_name)
+        if mapped_two_token:
+            return mapped_two_token
 
     compact_state = re.sub(r"[^A-Z]", "", normalized_state)
-    return STATE_ALIAS.get(normalized_state, STATE_ALIAS.get(compact_state, normalized_state))
+    mapped_state = STATE_ALIAS.get(normalized_state, STATE_ALIAS.get(compact_state, ""))
+    if mapped_state:
+        return mapped_state
+
+    if compact_state in HUB_BY_STATE:
+        return compact_state
+
+    # Handle values like `US-PA`, `Pennsylvania, US`, etc.
+    if len(compact_state) > 2 and compact_state[-2:] in HUB_BY_STATE:
+        return compact_state[-2:]
+
+    return normalized_state
 
 
 def infer_region_from_state(state: str) -> str:
