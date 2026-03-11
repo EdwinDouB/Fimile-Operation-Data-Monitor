@@ -1,6 +1,7 @@
 from utils.utils import *
 import streamlit as st
-from datetime import date
+from datetime import date, timedelta
+
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -90,6 +91,15 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
             return tracking_numbers
     finally:
         conn.close()
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_tracking_numbers_by_delivery_window(start_date: date, end_date: date) -> list[str]:
+    """
+    Query waybill_waybills for tracking_number where created_at is between
+    [start_date - 7 days, end_date] inclusive.
+    """
+    shifted_start = start_date - timedelta(days=7)
+    return fetch_tracking_numbers_by_date(shifted_start, end_date)
 
 
 
