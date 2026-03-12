@@ -126,20 +126,27 @@ def parse_route(description: Any) -> str:
     return ""
 
 def latest_route_assignment(events: list[dict[str, Any]]) -> str:
-    candidates: list[tuple[int, int, str]] = []
+    candidates: list[tuple[int, int, str, bool]] = []
     for idx, event in enumerate(events):
         route_name = parse_route(event_description(event))
         if not route_name:
             continue
 
+        route_info = parse_route_identity(route_name)
+        is_readable = bool(route_info["Hub"] and route_info["Contractor"])
+
         ts = event_ts(event)
         sort_ts = ts if ts is not None else -1
-        candidates.append((sort_ts, idx, route_name))
+        candidates.append((sort_ts, idx, route_name, is_readable))
 
     if not candidates:
         return ""
 
     candidates.sort(key=lambda x: (x[0], x[1]))
+    for _, _, route_name, is_readable in reversed(candidates):
+        if is_readable:
+            return route_name
+
     return candidates[-1][2]
 
 
