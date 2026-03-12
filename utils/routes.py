@@ -24,6 +24,7 @@ REGION_BY_HUB = {
     "EDS": "EA",
     "ATL": "EA",
     "MIA": "EA",
+    "ORL": "EA",
     "ONT": "WE",
     "HOU": "WE",
     "WDR": "WE",
@@ -45,7 +46,7 @@ STATE_ALIAS = {
 
 
 HUB_ALIAS = {
-    "GIA": "MIA",
+    "GIA": "ORL",
 }
 
 HUB_BY_STATE = {
@@ -75,7 +76,7 @@ KNOWN_DSP_CONTRACTORS = [
     "LXE",
     "YLL",
     "EOI",
-    "FFI",
+    "FF1",
     "EFB",
     "SEL",
     "GHH",
@@ -84,6 +85,9 @@ KNOWN_DSP_CONTRACTORS = [
     "BXI",
     "KAT",
     "FEDEX",
+    "GIA",
+    "MET",
+    "FNM",
 ]
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -191,6 +195,19 @@ def extract_contractor_by_keywords(route_name: str) -> str:
     if not route_text:
         return ""
 
+    special_patterns: list[tuple[str, str]] = [
+        (r"\bGTN\b", "GT"),
+        (r"\bEO\b", "EOI"),
+        (r"\bDX\b", "DRX"),
+        (r"\bFF\b", "FF1"),
+        (r"\bMET\b", "MET"),
+        (r"\bFNM\b", "FNM"),
+        (r"\bFINAL\s*MILE\b", "FNM"),
+        (r"\bYULIN\b", "YLL"),
+    ]
+    for pattern, contractor in special_patterns:
+        if re.search(pattern, route_text):
+            return contractor
     for contractor in KNOWN_DSP_CONTRACTORS:
         pattern = rf"(?<![A-Z0-9]){re.escape(contractor)}(?![A-Z0-9])"
         if re.search(pattern, route_text):
@@ -205,6 +222,19 @@ def extract_contractor_by_keywords(route_name: str) -> str:
 
     return ""
 
+    for contractor in KNOWN_DSP_CONTRACTORS:
+        pattern = rf"(?<![A-Z0-9]){re.escape(contractor)}(?![A-Z0-9])"
+        if re.search(pattern, route_text):
+            return contractor
+
+    compact_route_text = re.sub(r"[^A-Z0-9]", "", route_text)
+    for contractor in sorted(KNOWN_DSP_CONTRACTORS, key=len, reverse=True):
+        if len(contractor) < 3:
+            continue
+        if contractor in compact_route_text:
+            return contractor
+
+    return ""
 
 
 def _is_single_adjacent_swap(source: str, target: str) -> bool:
@@ -261,8 +291,18 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     """
     parts = extract_route_parts(route_name)
     fallback_hub = infer_hub_from_state(fallback_state)
-    if len(parts) < 2:
+    route_text = str(route_name or "").upper()
 
+    is_pickup_route = bool(re.search(r"\bPU\b", route_text) or re.search(r"\bPICK\s*UP\b", route_text))
+    if is_pickup_route:
+        return {
+            "Hub": "PU",
+            "Contractor": "",
+            "Driver": "",
+            "Route_type": "pickup",
+        }
+
+    if len(parts) < 2:
         return {
             "Hub": fallback_hub,
             "Contractor": "",
@@ -314,9 +354,19 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     if contractor and not match_known_contractor(contractor):
         contractor = ""
 
+    if re.search(r"\bGIA\b", route_text):
+        hub = "ORL"
+        contractor = "GIA"
+    elif re.search(r"\bMIA\b", route_text):
+        hub = "MIA"
+        contractor = "GT"
+
     keyword_contractor = extract_contractor_by_keywords(route_name)
     if keyword_contractor:
         contractor = keyword_contractor
+
+    if normalize_state(fallback_state) == "IL" and contractor != "MET":
+        contractor = contractor or "IL"
 
     route_type = "pickup" if hub == "PU" else "delivery"
 
@@ -713,11 +763,18 @@ def split_pickup_routes(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         return df.copy(), df.copy()
 
     hub_series = df["Hub"].fillna("").astype(str).str.strip().str.upper()
+    route_name_series = df.get("Route_name", "").fillna("").astype(str).str.upper()
     if "Route_type" in df.columns:
         route_type_series = df["Route_type"].fillna("").astype(str).str.strip().str.lower()
     else:
         route_type_series = pd.Series("", index=df.index)
-    pickup_mask = hub_series.eq("PU") | route_type_series.eq("pickup")
+
+    pickup_mask = (
+        hub_series.eq("PU")
+        | route_type_series.eq("pickup")
+        | route_name_series.str.contains(r"\bPU\b", regex=True)
+        | route_name_series.str.contains(r"\bPICK\s*UP\b", regex=True)
+    )
 
     pickup_df = df.loc[pickup_mask].copy()
     non_pickup_df = df.loc[~pickup_mask].copy()
