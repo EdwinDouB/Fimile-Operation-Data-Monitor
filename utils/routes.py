@@ -637,7 +637,8 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         q = img.get("quality")
         if not isinstance(q, dict):
             continue
-        df.at[idx, "Hub"] = infer_hub_from_state(fallback_state)
+        row[f"pod_feedback_{i}"] = str(q.get("feedback") or q.get("qualifiedFeedback") or "").strip()
+        row[f"pod_score_{i}"] = str(q.get("score") or "").strip()
 
     return row
 
