@@ -489,20 +489,18 @@ def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str)
         return build_export_df(filtered_df)
 
     non_pickup_df, _ = split_pickup_routes(filtered_df)
-    delivered_detail_df = non_pickup_df.loc[
-        non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
-        [
-            "tracking_id",
-            "Region",
-            "State",
-            "shipperName",
-            "Hub",
-            "Contractor",
-            "Route_name",
-            "out_for_delivery_time",
-            "delivered_time",
-        ],
-    ].copy()
+    delivered_detail_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "shipperName",
+        "Hub",
+        "Contractor",
+        "Route_name",
+        "out_for_delivery_time",
+        "delivered_time",
+    ]
+    delivered_detail_df = build_non_pickup_detail_df(non_pickup_df, delivered_detail_columns)
     delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
     delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
     delivered_detail_df["ofd_to_delivered_hours"] = (
@@ -521,31 +519,41 @@ def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str)
 
 def build_detailed_report_detail_df(filtered_df: pd.DataFrame) -> pd.DataFrame:
     non_pickup_df, _ = split_pickup_routes(filtered_df)
-    detail_df = non_pickup_df.loc[
-        non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
-        [
-            "tracking_id",
-            "Region",
-            "State",
-            "shipperName",
-            "Hub",
-            "Contractor",
-            "Route_name",
-            "first_out_for_delivery_date",
-            "first_failed_date",
-            "first_pod_complience",
-            "second_out_for_delivery_date",
-            "second_failed_date",
-            "second_pod_complience",
-            "third_out_for_delivery_date",
-            "third_failed_date",
-            "third_pod_complience",
-            "entered_costomer_service",
-            "beans_pod_link",
-            "delivered_time",
-        ],
-    ].copy()
+    detail_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "shipperName",
+        "Hub",
+        "Contractor",
+        "Route_name",
+        "first_out_for_delivery_date",
+        "first_failed_date",
+        "first_pod_complience",
+        "second_out_for_delivery_date",
+        "second_failed_date",
+        "second_pod_complience",
+        "third_out_for_delivery_date",
+        "third_failed_date",
+        "third_pod_complience",
+        "entered_costomer_service",
+        "beans_pod_link",
+        "delivered_time",
+    ]
+    detail_df = build_non_pickup_detail_df(non_pickup_df, detail_columns)
     return detail_df
+
+
+def build_non_pickup_detail_df(non_pickup_df: pd.DataFrame, detail_columns: list[str]) -> pd.DataFrame:
+    out_for_delivery_time_series = non_pickup_df.get("out_for_delivery_time", pd.Series("", index=non_pickup_df.index))
+    out_for_delivery_mask = out_for_delivery_time_series.notna() & out_for_delivery_time_series.astype(str).str.strip().ne("")
+
+    detail_df = non_pickup_df.loc[out_for_delivery_mask].copy()
+    for col in detail_columns:
+        if col not in detail_df.columns:
+            detail_df[col] = ""
+
+    return detail_df.loc[:, detail_columns]
 
 
 def process_tracking_ids(
