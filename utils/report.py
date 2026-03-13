@@ -23,10 +23,8 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate"])
 
     source_df = detail_df.copy()
-    if "out_for_delivery_time" in source_df.columns:
-        source_df["ofd_dt"] = to_datetime_series(source_df, _resolve_ofd_column(source_df))
-    else:
-        source_df["ofd_dt"] = pd.NaT
+    ofd_col = _resolve_ofd_column(source_df)
+    source_df["ofd_dt"] = to_datetime_series(source_df, ofd_col)
     if "delivered_time" in source_df.columns:
         source_df["delivered_dt"] = to_datetime_series(source_df, "delivered_time")
     else:
@@ -533,7 +531,8 @@ def kpi_report_to_excel_bytes(
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         workbook = writer.book
-        if layout_mode == "detailed" and detail_df is not None and not detail_df.empty:
+        detailed_layout_ready = layout_mode == "detailed" and detail_df is not None and not detail_df.empty
+        if detailed_layout_ready:
             overview_ws = workbook.add_worksheet("overview")
             overview_table = _build_detailed_overview_table(detail_df)
             _style_overview_worksheet(overview_ws, overview_table, 0, workbook)
@@ -579,115 +578,119 @@ def kpi_report_to_excel_bytes(
                     chart_col=max(len(hub_table.columns) + 2, 10),
                     data_col=max(len(hub_table.columns) + 28, 36),
                 )
+        if not detailed_layout_ready:
+            metrics_df.to_excel(writer, index=False, sheet_name="kpi_summary")
+            chart_df.to_excel(writer, index=False, sheet_name="kpi_chart_data")
+            if detail_df is not None and not detail_df.empty:
+                detail_df.to_excel(writer, index=False, sheet_name="detail_data")
 
-        metrics_df.to_excel(writer, index=False, sheet_name="kpi_summary")
-        chart_df.to_excel(writer, index=False, sheet_name="kpi_chart_data")
-        if detail_df is not None and not detail_df.empty:
-            detail_df.to_excel(writer, index=False, sheet_name="detail_data")
+                if not chart_df.empty:
+                    detail_columns = {name: idx for idx, name in enumerate(detail_df.columns)}
+                    yes_cols = [
+                        detail_columns.get("first_pod_complience"),
+                        detail_columns.get("second_pod_complience"),
+                        detail_columns.get("third_pod_complience"),
+                    ]
+                    yes_cols = [idx for idx in yes_cols if idx is not None]
+                    if yes_cols:
+                        total_rows = len(detail_df) + 1
 
-            if not chart_df.empty:
-                detail_columns = {name: idx for idx, name in enumerate(detail_df.columns)}
-                yes_cols = [
-                    detail_columns.get("first_pod_complience"),
-                    detail_columns.get("second_pod_complience"),
-                    detail_columns.get("third_pod_complience"),
-                ]
-                yes_cols = [idx for idx in yes_cols if idx is not None]
-                if yes_cols:
-                    total_rows = len(detail_df) + 1
+                        def _countif_sum(target: str) -> str:
+                            exprs = []
+                            for col_idx in yes_cols:
+                                col_name = xl_col_to_name(col_idx)
+                                exprs.append(f'COUNTIF(detail_data!${col_name}$2:${col_name}${total_rows},"{target}")')
+                            return "+".join(exprs) if exprs else "0"
 
-                    def _countif_sum(target: str) -> str:
-                        exprs = []
-                        for col_idx in yes_cols:
-                            col_name = xl_col_to_name(col_idx)
-                            exprs.append(f'COUNTIF(detail_data!${col_name}$2:${col_name}${total_rows},"{target}")')
-                        return "+".join(exprs) if exprs else "0"
-
-                    for ridx, rec in chart_df.iterrows():
-                        chart_name = str(rec.get("chart", ""))
-                        category = str(rec.get("category", "")).strip().lower()
-                        excel_row = ridx + 1
-                        if chart_name == "Manual POD qualified rate":
-                            if "not" in category:
-                                writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("No")}')
-                            else:
-                                writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("Yes")}')
-                        if chart_name == "24h attempt rate":
-                            if "no" in category:
-                                writer.sheets["kpi_chart_data"].write_formula(
-                                    excel_row,
-                                    2,
-                                    f'=MAX(COUNTA(detail_data!$A$2:$A${total_rows})-({_countif_sum("Yes")}),0)',
-                                )
-                            else:
-                                writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("Yes")}')
+                        for ridx, rec in chart_df.iterrows():
+                            chart_name = str(rec.get("chart", ""))
+                            category = str(rec.get("category", "")).strip().lower()
+                            excel_row = ridx + 1
+                            if chart_name == "Manual POD qualified rate":
+                                if "not" in category:
+                                    writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("No")}')
+                                else:
+                                    writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("Yes")}')
+                            if chart_name == "24h attempt rate":
+                                if "no" in category:
+                                    writer.sheets["kpi_chart_data"].write_formula(
+                                        excel_row,
+                                        2,
+                                        f'=MAX(COUNTA(detail_data!$A$2:$A${total_rows})-({_countif_sum("Yes")}),0)',
+                                    )
+                                else:
+                                    writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("Yes")}')
 
         pod_review_df = kpi_payload.get("pod_review_df")
+        if (not isinstance(pod_review_df, pd.DataFrame) or pod_review_df.empty) and source_df is not None and not source_df.empty:
+            pod_review_df = build_kpi_report_payload(source_df).get("pod_review_df")
         if isinstance(pod_review_df, pd.DataFrame):
             pod_review_df.to_excel(writer, index=False, sheet_name="manual_review_data")
 
-        data_ws = writer.sheets["kpi_chart_data"]
-        chart_ws = workbook.add_worksheet("kpi_charts")
+        if not detailed_layout_ready:
+            data_ws = writer.sheets["kpi_chart_data"]
+            chart_ws = workbook.add_worksheet("kpi_charts")
 
-        percent_fmt = workbook.add_format({"num_format": "0.00%"})
-        summary_ws = writer.sheets["kpi_summary"]
-        summary_ws.set_column("A:B", 40)
-        summary_ws.set_column("C:D", 12)
-        summary_ws.set_column("E:E", 14, percent_fmt)
-        data_ws.set_column("A:B", 40)
-        data_ws.set_column("C:C", 12)
-        data_ws.set_column("D:D", 14, percent_fmt)
-        if detail_df is not None and not detail_df.empty:
-            detail_ws = writer.sheets["detail_data"]
-            detail_ws.set_column(0, max(len(detail_df.columns) - 1, 0), 20)
+            percent_fmt = workbook.add_format({"num_format": "0.00%"})
+            summary_ws = writer.sheets["kpi_summary"]
+            summary_ws.set_column("A:B", 40)
+            summary_ws.set_column("C:D", 12)
+            summary_ws.set_column("E:E", 14, percent_fmt)
+            data_ws.set_column("A:B", 40)
+            data_ws.set_column("C:C", 12)
+            data_ws.set_column("D:D", 14, percent_fmt)
+            if detail_df is not None and not detail_df.empty:
+                detail_ws = writer.sheets["detail_data"]
+                detail_ws.set_column(0, max(len(detail_df.columns) - 1, 0), 20)
         if "manual_review_data" in writer.sheets:
             pod_ws = writer.sheets["manual_review_data"]
             pod_ws.set_column(0, 16, 20)
             pod_ws.set_column(17, 17, 60)
             pod_ws.set_column(18, 20, 24)
+        if not detailed_layout_ready:
+            row_cursor = 0
+            col_cursor = 0
+            max_cols = 3
+            chart_order = list(chart_df["chart"].dropna().astype(str).unique())
 
-        row_cursor = 0
-        col_cursor = 0
-        max_cols = 3
-        chart_order = list(chart_df["chart"].dropna().astype(str).unique())
-        def _chart_group_key(name: str) -> int:
-            lower = name.lower()
-            if "delivery" in lower:
-                return 0
-            if "scan" in lower:
-                return 1
-            if "pod" in lower or "attempt" in lower:
-                return 2
-            if "lost" in lower:
-                return 3
-            return 4
+            def _chart_group_key(name: str) -> int:
+                lower = name.lower()
+                if "delivery" in lower:
+                    return 0
+                if "scan" in lower:
+                    return 1
+                if "pod" in lower or "attempt" in lower:
+                    return 2
+                if "lost" in lower:
+                    return 3
+                return 4
 
-        chart_order = sorted(chart_order, key=lambda n: (_chart_group_key(n), chart_order.index(n)))
+            chart_order = sorted(chart_order, key=lambda n: (_chart_group_key(n), chart_order.index(n)))
 
-        for chart_name in chart_order:
-            group = chart_df[chart_df["chart"] == chart_name]
+            for chart_name in chart_order:
+                group = chart_df[chart_df["chart"] == chart_name]
 
-            rows = group.index.to_list()
-            if not rows:
-                continue
-            excel_rows = [r + 1 for r in rows]
+                rows = group.index.to_list()
+                if not rows:
+                    continue
+                excel_rows = [r + 1 for r in rows]
 
-            pie = workbook.add_chart({"type": "pie"})
-            pie.add_series(
-                {
-                    "name": chart_name,
-                    "categories": ["kpi_chart_data", excel_rows[0], 1, excel_rows[-1], 1],
-                    "values": ["kpi_chart_data", excel_rows[0], 2, excel_rows[-1], 2],
-                    "data_labels": {"percentage": True, "category": True},
-                }
-            )
-            pie.set_title({"name": chart_name})
-            pie.set_style(10)
+                pie = workbook.add_chart({"type": "pie"})
+                pie.add_series(
+                    {
+                        "name": chart_name,
+                        "categories": ["kpi_chart_data", excel_rows[0], 1, excel_rows[-1], 1],
+                        "values": ["kpi_chart_data", excel_rows[0], 2, excel_rows[-1], 2],
+                        "data_labels": {"percentage": True, "category": True},
+                    }
+                )
+                pie.set_title({"name": chart_name})
+                pie.set_style(10)
 
-            chart_ws.insert_chart(row_cursor, col_cursor, pie, {"x_scale": 1.0, "y_scale": 1.0})
-            col_cursor += 8
-            if col_cursor >= max_cols * 8:
-                col_cursor = 0
-                row_cursor += 16
+                chart_ws.insert_chart(row_cursor, col_cursor, pie, {"x_scale": 1.0, "y_scale": 1.0})
+                col_cursor += 8
+                if col_cursor >= max_cols * 8:
+                    col_cursor = 0
+                    row_cursor += 16
 
     return output.getvalue()
