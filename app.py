@@ -561,6 +561,8 @@ def process_tracking_ids(
     router_messages_map: dict[str, Any],
     progress_bar,
     status_text,
+    progress_start: float = 0.0,
+    progress_end: float = 1.0,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
     rows_by_id: dict[str, dict[str, str]] = {}
     failures: list[dict[str, str]] = []
@@ -604,7 +606,8 @@ def process_tracking_ids(
                 failures.append(failure)
 
             completed += 1
-            progress_bar.progress(completed / total)
+            progress_value = progress_start + (progress_end - progress_start) * (completed / total)
+            progress_bar.progress(progress_value)
             status_text.text(tr("processing", completed=completed, total=total, tracking_id=tracking_id))
 
     ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
@@ -721,16 +724,31 @@ def main() -> None:
         receive_province_map: dict[str, str] = {}
         sender_info_map: dict[str, dict[str, str]] = {}
         router_messages_map: dict[str, Any] = {}
+        progress = st.progress(0)
+        status = st.empty()
+
+        setup_steps = 3
+        completed_setup_steps = 0
+
+        def update_setup_progress(message: str) -> None:
+            nonlocal completed_setup_steps
+            completed_setup_steps += 1
+            progress.progress((completed_setup_steps / setup_steps) * 0.3)
+            status.text(message)
 
         try:
             receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
         except Exception as e:
             st.warning(tr("state_region_fail", error=e))
+        finally:
+            update_setup_progress("Loading recipient location data...")
 
         try:
             sender_info_map = fetch_sender_info_map(tuple(dedup_ids))
         except Exception:
             sender_info_map = {}
+        finally:
+            update_setup_progress("Loading sender profile data...")
 
         try:
             fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
@@ -747,9 +765,8 @@ def main() -> None:
         except Exception as e:
             st.warning(f"Failed to load router_messages from DB: {e}")
             router_messages_map = {}
-
-        progress = st.progress(0)
-        status = st.empty()
+        finally:
+            update_setup_progress("Loading route event payloads...")
 
         result_df, failures = process_tracking_ids(
             dedup_ids=dedup_ids,
@@ -758,6 +775,8 @@ def main() -> None:
             router_messages_map=router_messages_map,
             progress_bar=progress,
             status_text=status,
+            progress_start=0.3,
+            progress_end=1.0,
         )
 
         result_df = fill_route_identity_columns(result_df)
