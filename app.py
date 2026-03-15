@@ -342,16 +342,15 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         )
 
     st.markdown("#### 12/24/48/72h Scan Rate (Pickup -> Scan)")
-    scan_detail_df = result_df[
-        [
-            "tracking_id",
-            "Region",
-            "State",
-            "shipperName",
-            "created_time",
-            "first_scanned_time",
-        ]
-    ].copy()
+    scan_detail_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "shipperName",
+        "created_time",
+        "first_scanned_time",
+    ]
+    scan_detail_df = result_df.reindex(columns=scan_detail_columns, fill_value="").copy()
     scan_detail_df["created_dt"] = to_datetime_series(scan_detail_df, "created_time")
     scan_detail_df["first_scanned_dt"] = to_datetime_series(scan_detail_df, "first_scanned_time")
     scan_detail_df["created_to_scan_hours"] = (
