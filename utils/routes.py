@@ -616,16 +616,20 @@ def extract_pod_images_from_payload(payload: Any) -> list[dict[str, Any]]:
 
 
 def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> bool:
-    if not event and not isinstance(payload, dict):
+    if not event:
         return False
 
-    pod_images: list[dict[str, Any]] = []
-    if event:
-        pod_images.extend(extract_pod_images_from_success_event(event))
-
-    if isinstance(payload, dict):
-        payload_images = extract_pod_images_from_payload(payload)
-        pod_images.extend(payload_images)
+    pod_images = extract_pod_images_from_success_event(event)
+    if len(pod_images) < 3 and isinstance(payload, dict):
+        fallback_images = extract_pod_images_from_payload(payload)
+        seen_urls = {str(img.get("url") or "").strip() for img in pod_images if isinstance(img, dict)}
+        for image in fallback_images:
+            image_url = str(image.get("url") or "").strip()
+            if image_url and image_url in seen_urls:
+                continue
+            pod_images.append(image)
+            if image_url:
+                seen_urls.add(image_url)
 
     pod_count = len(pod_images)
     non_zero_scored_count = 0
