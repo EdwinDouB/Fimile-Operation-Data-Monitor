@@ -561,48 +561,79 @@ def extract_shipper_name_from_events(events: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _extract_pod_images_from_container(container: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(container, dict):
+        return []
+
+    all_images: list[dict[str, Any]] = []
+
+    pod_obj = container.get("pod")
+    if isinstance(pod_obj, dict):
+        images = pod_obj.get("images")
+        if isinstance(images, list):
+            all_images.extend([x for x in images if isinstance(x, dict)])
+
+    pods_obj = container.get("pods")
+    if isinstance(pods_obj, dict):
+        pod_list = pods_obj.get("pod")
+        if isinstance(pod_list, list):
+            for pod_entry in pod_list:
+                if not isinstance(pod_entry, dict):
+                    continue
+                images = pod_entry.get("images")
+                if isinstance(images, list):
+                    all_images.extend([x for x in images if isinstance(x, dict)])
+
+    return all_images
+
+
 def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not success_evt:
         return []
 
     all_images: list[dict[str, Any]] = []
 
-    def extract_images_from_container(container: dict[str, Any]) -> None:
-        pod_obj = container.get("pod")
-        if isinstance(pod_obj, dict):
-            images = pod_obj.get("images")
-            if isinstance(images, list):
-                all_images.extend([x for x in images if isinstance(x, dict)])
-
-        pods_obj = container.get("pods")
-        if isinstance(pods_obj, dict):
-            pod_list = pods_obj.get("pod")
-            if isinstance(pod_list, list):
-                for pod_entry in pod_list:
-                    if not isinstance(pod_entry, dict):
-                        continue
-                    images = pod_entry.get("images")
-                    if isinstance(images, list):
-                        all_images.extend([x for x in images if isinstance(x, dict)])
-
     for container in (success_evt, success_evt.get("logItem"), success_evt.get("log")):
-        if isinstance(container, dict):
-            extract_images_from_container(container)
+        all_images.extend(_extract_pod_images_from_container(container))
 
     return all_images
 
 
-def is_pod_compliant_for_event(event: dict[str, Any] | None) -> bool:
-    if not event:
+def extract_pod_images_from_payload(payload: Any) -> list[dict[str, Any]]:
+    images: list[dict[str, Any]] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            images.extend(_extract_pod_images_from_container(node))
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    return images
+
+
+def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> bool:
+    if not event and not isinstance(payload, dict):
         return False
-    pod_images = extract_pod_images_from_success_event(event)
+
+    pod_images: list[dict[str, Any]] = []
+    if event:
+        pod_images.extend(extract_pod_images_from_success_event(event))
+
+    if isinstance(payload, dict):
+        payload_images = extract_pod_images_from_payload(payload)
+        pod_images.extend(payload_images)
+
     pod_count = len(pod_images)
     non_zero_scored_count = 0
     for img in pod_images:
         q = img.get("quality")
         if not isinstance(q, dict):
             continue
-        score = str(q.get("score") or "").strip()
+        score = str(q.get("score") or q.get("qualifiedScore") or "").strip()
         if score:
             try:
                 if float(score) != 0:
@@ -612,7 +643,7 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None) -> bool:
     return pod_count >= 3 and non_zero_scored_count >= 1
 
 
-def build_intervals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     intervals: list[dict[str, Any]] = []
 
     def interval_ts(event: dict[str, Any]) -> int | None:
@@ -651,7 +682,7 @@ def build_intervals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 node["route"] = route
 
         if evt_type in {"fail", "failed", "failure", "success", "delivered"}:
-            node["POD"] = is_pod_compliant_for_event(event)
+            node["POD"] = is_pod_compliant_for_event(event, payload=payload)
 
         intervals.append(node)
     return intervals
@@ -713,7 +744,7 @@ def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str,
 
 def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     events = normalize_events(payload)
-    intervals = build_intervals(events)
+    intervals = build_intervals(events, payload=payload)
     is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
 
     scanned_predicate = lambda e: (
