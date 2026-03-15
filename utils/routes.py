@@ -572,6 +572,13 @@ def _extract_pod_images_from_container(container: dict[str, Any] | None) -> list
         images = pod_obj.get("images")
         if isinstance(images, list):
             all_images.extend([x for x in images if isinstance(x, dict)])
+    elif isinstance(pod_obj, list):
+        for pod_entry in pod_obj:
+            if not isinstance(pod_entry, dict):
+                continue
+            images = pod_entry.get("images")
+            if isinstance(images, list):
+                all_images.extend([x for x in images if isinstance(x, dict)])
 
     pods_obj = container.get("pods")
     if isinstance(pods_obj, dict):
@@ -583,8 +590,48 @@ def _extract_pod_images_from_container(container: dict[str, Any] | None) -> list
                 images = pod_entry.get("images")
                 if isinstance(images, list):
                     all_images.extend([x for x in images if isinstance(x, dict)])
+        elif isinstance(pod_list, dict):
+            images = pod_list.get("images")
+            if isinstance(images, list):
+                all_images.extend([x for x in images if isinstance(x, dict)])
 
     return all_images
+
+
+def _event_has_pod_marker(event: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> bool:
+    if not isinstance(event, dict):
+        return False
+
+    def _truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "y"}
+        return False
+
+    candidate_nodes: list[Any] = [event, event.get("logItem"), event.get("log")]
+    if isinstance(payload, dict):
+        candidate_nodes.append(payload)
+
+    for node in candidate_nodes:
+        if not isinstance(node, dict):
+            continue
+
+        pod_value = node.get("pod")
+        if isinstance(pod_value, dict) and pod_value:
+            return True
+        if isinstance(pod_value, list) and any(isinstance(item, dict) for item in pod_value):
+            return True
+        if _truthy(pod_value):
+            return True
+
+        for flag_key in ("hasPod", "isPod", "podAvailable", "podUploaded"):
+            if _truthy(node.get(flag_key)):
+                return True
+
+    return False
 
 
 def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -644,7 +691,15 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
                     non_zero_scored_count += 1
             except (TypeError, ValueError):
                 non_zero_scored_count += 1
-    return pod_count >= 3 and non_zero_scored_count >= 1
+    if pod_count >= 3 and non_zero_scored_count >= 1:
+        return True
+
+    # Fallback: some carriers do not return quality scores for every POD image,
+    # but the event still includes valid POD evidence.
+    if pod_count >= 1:
+        return True
+
+    return _event_has_pod_marker(event, payload=payload)
 
 
 def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
