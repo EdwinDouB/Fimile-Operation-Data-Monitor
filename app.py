@@ -233,6 +233,68 @@ def build_route_attempt_metrics(route_attempts_df: pd.DataFrame) -> dict[str, di
     }
 
 
+def build_tracking_display_df(
+    source_df: pd.DataFrame,
+    route_attempts_df: pd.DataFrame,
+    unresolved_attempts_df: pd.DataFrame,
+    canceled_attempts_df: pd.DataFrame,
+    lost_attempts_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if source_df.empty:
+        return pd.DataFrame()
+
+    display_df = source_df.copy()
+    display_df["tracking_id"] = display_df.get("tracking_id", "").fillna("").astype(str).str.strip()
+
+    route_latest = pd.DataFrame(columns=["tracking_id", "attempt_result", "last_route", "last_out_for_delivery_time", "last_finish_time"])
+    if not route_attempts_df.empty:
+        route_sorted = route_attempts_df.copy()
+        route_sorted["_finish_dt"] = pd.to_datetime(route_sorted.get("finish_time"), errors="coerce")
+        route_sorted = route_sorted.sort_values(by=["tracking_id", "_finish_dt"], na_position="last")
+        route_latest = (
+            route_sorted.groupby("tracking_id", as_index=False)
+            .tail(1)
+            .rename(
+                columns={
+                    "result": "attempt_result",
+                    "route": "last_route",
+                    "out_for_delivery_time": "last_out_for_delivery_time",
+                    "finish_time": "last_finish_time",
+                }
+            )[["tracking_id", "attempt_result", "last_route", "last_out_for_delivery_time", "last_finish_time"]]
+        )
+
+    unresolved_ids = set(unresolved_attempts_df.get("tracking_id", pd.Series(dtype=str)).dropna().astype(str).str.strip().tolist())
+    canceled_ids = set(canceled_attempts_df.get("tracking_id", pd.Series(dtype=str)).dropna().astype(str).str.strip().tolist())
+    lost_ids = set(lost_attempts_df.get("tracking_id", pd.Series(dtype=str)).dropna().astype(str).str.strip().tolist())
+
+    display_df = display_df.merge(route_latest, on="tracking_id", how="left")
+    display_df["display_status"] = "processing"
+    display_df.loc[display_df["tracking_id"].isin(canceled_ids), "display_status"] = "canceled"
+    display_df.loc[display_df["tracking_id"].isin(lost_ids), "display_status"] = "lost_after_ofd"
+    display_df.loc[display_df["tracking_id"].isin(unresolved_ids), "display_status"] = "unresolved"
+    display_df.loc[display_df["attempt_result"].eq("success"), "display_status"] = "delivered"
+    display_df.loc[display_df["attempt_result"].eq("fail"), "display_status"] = "failed_attempt"
+
+    preferred_columns = [
+        "tracking_id",
+        "display_status",
+        "attempt_result",
+        "last_route",
+        "last_out_for_delivery_time",
+        "last_finish_time",
+        "delivered_time",
+        "Region",
+        "State",
+        "Hub",
+        "Contractor",
+        "Driver",
+        "created_time",
+    ]
+    existing_columns = [col for col in preferred_columns if col in display_df.columns]
+    return display_df.loc[:, existing_columns].sort_values(by=["display_status", "tracking_id"], na_position="last")
+
+
 def build_timeliness_quality_breakdown_table(route_attempts_df: pd.DataFrame, thresholds: list[int] | None = None) -> pd.DataFrame:
     thresholds = thresholds or [24, 48, 72]
     if route_attempts_df.empty:
@@ -925,9 +987,8 @@ def main() -> None:
     if "contractor_filter" not in st.session_state:
         st.session_state["contractor_filter"] = "ALL"
     today = date.today()
-    tomorrow = today + timedelta(days=1)
-    default_query_start = date(2026, 3, 4)
-    default_query_end = date(2026, 3, 5)
+    default_query_end = today
+    default_query_start = today - timedelta(days=1)
     date_input_min = today - timedelta(days=365 * 5)
     date_input_max = today + timedelta(days=365 * 2)
 
@@ -965,9 +1026,6 @@ def main() -> None:
         st.session_state["contractor_override_hub"] = ""
     if "contractor_override_name" not in st.session_state:
         st.session_state["contractor_override_name"] = ""
-    if "auto_test_preset_ran" not in st.session_state:
-        st.session_state["auto_test_preset_ran"] = False
-        
     st.selectbox(
         tr("language_label"),
         options=["zh", "en"],
@@ -1000,12 +1058,7 @@ def main() -> None:
         )
 
     raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
-    manual_run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
-    auto_run_btn = not st.session_state["auto_test_preset_ran"]
-    if auto_run_btn:
-        st.session_state["auto_test_preset_ran"] = True
-
-    run_btn = manual_run_btn or auto_run_btn
+    run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
     if run_btn:
         clear_query_caches()
         with st.spinner(tr("loading_db")):
@@ -1348,8 +1401,17 @@ def main() -> None:
             )
 
         st.subheader(tr("result_preview"))
-        preview_df = build_export_df(filtered_df)
-        st.dataframe(preview_df.head(50), use_container_width=True)
+        display_df = build_tracking_display_df(
+            filtered_df,
+            route_attempts_df=route_attempts_df,
+            unresolved_attempts_df=unresolved_attempts_df,
+            canceled_attempts_df=canceled_attempts_df,
+            lost_attempts_df=lost_attempts_df,
+        )
+        if display_df.empty:
+            st.info("No records under current filters.")
+        else:
+            st.dataframe(display_df, use_container_width=True)
 
         st.subheader(tr("customer_summary_section"))
         customer_summary_df = build_customer_address_summary(filtered_df)
