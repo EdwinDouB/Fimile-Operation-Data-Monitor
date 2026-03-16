@@ -735,6 +735,9 @@ def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None
             "type": interval_type,
         }
 
+        if evt_type == "warehouse" and description.strip():
+            node["description"] = description.strip()
+
         if evt_type in {"fail", "failed", "failure", "out-for-delivery", "ofd", "outfordelivery", "success", "delivered"}:
             route = parse_route(description)
             if route:
@@ -777,6 +780,44 @@ def extract_hub_from_scan_description(description: str) -> str:
     return match.group(1).upper()
 
 
+def extract_hub_name_from_warehouse_description(description: str) -> str:
+    desc = str(description or "").strip()
+    if not desc:
+        return ""
+
+    match = re.search(r"(?i)\bscanned\s+at\s+(.+)$", desc)
+    if not match:
+        return ""
+
+    return match.group(1).strip(" .")
+
+
+def infer_hub_from_pre_ofd_warehouse(events: list[dict[str, Any]], ofd_evt: dict[str, Any] | None) -> str:
+    ofd_ts = event_ts(ofd_evt) if ofd_evt else None
+    warehouse_events: list[dict[str, Any]] = []
+
+    for evt in events:
+        if event_type(evt) != "warehouse":
+            continue
+
+        evt_ts = event_ts(evt)
+        if ofd_ts is not None and evt_ts is not None and evt_ts > ofd_ts:
+            continue
+
+        description = event_description(evt)
+        if not extract_hub_name_from_warehouse_description(description):
+            continue
+
+        warehouse_events.append(evt)
+
+    if not warehouse_events:
+        return ""
+
+    warehouse_events.sort(key=lambda e: ((event_ts(e) if event_ts(e) is not None else -1), events.index(e)))
+    latest_event = warehouse_events[-1]
+    return extract_hub_name_from_warehouse_description(event_description(latest_event))
+
+
 def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str, Any] | None) -> str:
     ofd_ts = event_ts(ofd_evt) if ofd_evt else None
     scan_events: list[dict[str, Any]] = []
@@ -817,6 +858,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     success_events = events_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
 
     ofd_evt = ofd_events[0] if ofd_events else None
+    warehouse_hub = infer_hub_from_pre_ofd_warehouse(events, ofd_evt)
     scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
     fail_evt = fail_events[0] if fail_events else None
     success_evt = success_events[0] if success_events else None
@@ -860,7 +902,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     row: dict[str, str] = {
         "tracking_id": tracking_id,
         "Driver": str(structured_identity.get("Driver") or "").strip(),
-        "Hub": str(structured_identity.get("Hub") or scan_hub or "").strip(),
+        "Hub": str(warehouse_hub or structured_identity.get("Hub") or scan_hub or "").strip(),
         "Contractor": str(structured_identity.get("Contractor") or "").strip(),
         "router_messages": raw_router_messages,
         "created_time": fmt_dt(created_time),
