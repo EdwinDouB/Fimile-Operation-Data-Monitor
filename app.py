@@ -4,6 +4,7 @@ import json
 
 import utils.db as db
 import utils.report as report_utils
+import utils.routes as route_utils
 from utils.utils import *
 from utils.db import * 
 from utils.routes import *
@@ -426,7 +427,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         fetch_reference_time=fetch_reference_time,
     )
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
-    non_pickup_df, _ = split_pickup_routes(result_df)
+    non_pickup_df, _ = route_utils.split_pickup_routes(result_df)
     attempt_detail_df = report_utils.build_attempt_kpi_detail_df(non_pickup_df)
     metric_map = _metric_lookup(kpi_payload)
 
@@ -617,7 +618,7 @@ def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str)
     if layout_mode != "compact":
         return build_export_df(filtered_df)
 
-    non_pickup_df, _ = split_pickup_routes(filtered_df)
+    non_pickup_df, _ = route_utils.split_pickup_routes(filtered_df)
     delivered_detail_columns = [
         "tracking_id",
         "Region",
@@ -647,7 +648,7 @@ def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str)
 
 
 def build_detailed_report_detail_df(filtered_df: pd.DataFrame) -> pd.DataFrame:
-    non_pickup_df, _ = split_pickup_routes(filtered_df)
+    non_pickup_df, _ = route_utils.split_pickup_routes(filtered_df)
     detail_columns = [
         "tracking_id",
         "Region",
