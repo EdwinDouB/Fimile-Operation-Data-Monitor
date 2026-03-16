@@ -52,6 +52,15 @@ def _parse_list_cell(value: Any) -> list[str]:
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
+def _pod_qualified(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    return text in {"true", "1", "yes", "y", "是"}
+
+
 def ensure_compatibility_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -180,7 +189,7 @@ def build_route_attempts_view(
                     "created_time": row.get("created_time", ""),
                     "out_for_delivery_time": fmt_dt(to_local_dt(current_ofd_event.get("time"))),
                     "finish_time": fmt_dt(to_local_dt(matched_terminal.get("time"))),
-                    "POD是否合格": "是" if bool(matched_terminal.get("POD")) else "否",
+                    "POD是否合格": "是" if _pod_qualified(matched_terminal.get("POD")) else "否",
                 }
             )
             idx = search_idx + 1
