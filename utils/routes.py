@@ -763,7 +763,7 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
         q = img.get("quality")
         if not isinstance(q, dict):
             continue
-        score = str(q.get("score") or "").strip()
+        score = str(q.get("score") or q.get("qualifiedScore") or "").strip()
         if score:
             try:
                 if float(score) != 0:
