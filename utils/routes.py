@@ -765,6 +765,11 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
     if not event:
         return False
 
+    # Some carriers only return POD flags/timestamps without complete image arrays.
+    # In that case, treat it as POD-qualified to avoid false negatives in interval output.
+    if _event_has_pod_marker(event, payload=payload):
+        return True
+
     pod_images = extract_pod_images_from_success_event(event)
     if len(pod_images) < 3 and isinstance(payload, dict):
         fallback_images = extract_pod_images_from_payload(payload)
