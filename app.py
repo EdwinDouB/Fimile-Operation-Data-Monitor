@@ -827,6 +827,14 @@ def main() -> None:
         st.session_state["hub_filter"] = "ALL"
     if "contractor_filter" not in st.session_state:
         st.session_state["contractor_filter"] = "ALL"
+    if "delivery_filter_start" not in st.session_state:
+        st.session_state["delivery_filter_start"] = date.today() - timedelta(days=7)
+    if "delivery_filter_end" not in st.session_state:
+        st.session_state["delivery_filter_end"] = date.today()
+    if "delivery_filter_start_applied" not in st.session_state:
+        st.session_state["delivery_filter_start_applied"] = st.session_state["delivery_filter_start"]
+    if "delivery_filter_end_applied" not in st.session_state:
+        st.session_state["delivery_filter_end_applied"] = st.session_state["delivery_filter_end"]
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
@@ -1063,6 +1071,23 @@ def main() -> None:
         with filter_c5:
             selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
 
+        delivery_filter_c1, delivery_filter_c2, delivery_filter_c3 = st.columns([2, 2, 1])
+        with delivery_filter_c1:
+            st.date_input(
+                tr("delivery_filter_start"),
+                key="delivery_filter_start",
+            )
+        with delivery_filter_c2:
+            st.date_input(
+                tr("delivery_filter_end"),
+                key="delivery_filter_end",
+            )
+        with delivery_filter_c3:
+            st.write("")
+            if st.button(tr("apply_delivery_filter"), use_container_width=True):
+                st.session_state["delivery_filter_start_applied"] = st.session_state["delivery_filter_start"]
+                st.session_state["delivery_filter_end_applied"] = st.session_state["delivery_filter_end"]
+
         filtered_df = result_df.copy()
         if selected_region != tr("all"):
             filtered_df = filtered_df[
@@ -1084,6 +1109,17 @@ def main() -> None:
             filtered_df = filtered_df[
                 filtered_df["Contractor"].fillna("").astype(str).str.strip() == selected_contractor
             ]
+
+        delivery_filter_start = st.session_state.get("delivery_filter_start_applied")
+        delivery_filter_end = st.session_state.get("delivery_filter_end_applied")
+        if delivery_filter_start and delivery_filter_end and delivery_filter_start <= delivery_filter_end:
+            ofd_date_series = to_datetime_series(filtered_df, "out_for_delivery_time").dt.date
+            ofd_range_mask = (
+                ofd_date_series.notna()
+                & (ofd_date_series >= delivery_filter_start)
+                & (ofd_date_series <= delivery_filter_end)
+            )
+            filtered_df = filtered_df[ofd_range_mask]
 
         if st.session_state.get("hide_unknown_dimensions", False):
             known_mask = (~filtered_df["Hub"].map(is_unknown_dimension_value)) & (~filtered_df["Contractor"].map(is_unknown_dimension_value))
