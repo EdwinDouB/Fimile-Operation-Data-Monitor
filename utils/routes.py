@@ -745,10 +745,6 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
     if not event:
         return False
 
-    has_pod_marker = _event_has_pod_marker(event, payload=payload)
-    if not has_pod_marker:
-        return False
-
     pod_images = extract_pod_images_from_success_event(event)
     if len(pod_images) < 3 and isinstance(payload, dict):
         fallback_images = extract_pod_images_from_payload(payload)
