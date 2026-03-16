@@ -41,9 +41,9 @@ def build_route_attempts_view(
     if source_df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    success_types = {"success", "delivered"}
-    fail_types = {"fail", "failed", "failure"}
-    ofd_types = {"out-for-delivery", "ofd", "outfordelivery"}
+    success_types = {"success"}
+    fail_types = {"fail"}
+    ofd_types = {"out-for-delivery"}
 
     route_rows: list[dict[str, Any]] = []
     unresolved_rows: list[dict[str, Any]] = []
@@ -65,7 +65,7 @@ def build_route_attempts_view(
             continue
 
         last_event = intervals[-1] if intervals else {}
-        last_event_type = str(last_event.get("type") or "").strip().lower()
+        last_event_type = route_utils.event_type(last_event)
         if last_event_type == "cancel":
             canceled_rows.append(
                 {
@@ -82,7 +82,7 @@ def build_route_attempts_view(
         idx = 0
         while idx < len(intervals):
             event = intervals[idx]
-            event_type_value = str(event.get("type") or "").strip().lower()
+            event_type_value = route_utils.event_type(event)
             if event_type_value not in ofd_types:
                 idx += 1
                 continue
@@ -95,7 +95,7 @@ def build_route_attempts_view(
 
             while search_idx < len(intervals):
                 candidate_event = intervals[search_idx]
-                candidate_type = str(candidate_event.get("type") or "").strip().lower()
+                candidate_type = route_utils.event_type(candidate_event)
 
                 if candidate_type in ofd_types:
                     current_ofd_event = candidate_event
@@ -120,7 +120,7 @@ def build_route_attempts_view(
                 )
                 break
 
-            matched_type = str(matched_terminal.get("type") or "").strip().lower()
+            matched_type = route_utils.event_type(matched_terminal)
             route_name = str(current_ofd_event.get("route") or matched_terminal.get("route") or "").strip()
             route_rows.append(
                 {
@@ -524,11 +524,30 @@ def render_kpi_charts(
         metric = route_attempt_metrics.get(label, {"rate": 0.0, "hit": 0, "total": 0})
         metric_cols[i].metric(label, f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
 
+    pie_cols = st.columns(len(metric_specs))
+    for i, label in enumerate(metric_specs):
+        metric = route_attempt_metrics.get(label, {"rate": 0.0, "hit": 0, "total": 0})
+        if label == "24h尝试率":
+            hit_label = "24h内完成尝试"
+            miss_label = "超24h或缺失终态"
+        else:
+            hit_label = f"{label}达标"
+            miss_label = f"{label}未达标"
+        render_percentage_pie(
+            title=f"{label} 构成",
+            hit_count=int(metric["hit"]),
+            total_count=int(metric["total"]),
+            hit_label=hit_label,
+            miss_label=miss_label,
+            chart_key=f"attempt_{i}_{refresh_key}",
+            container=pie_cols[i],
+        )
+
     st.caption("口径：基于“按派送尝试整理的Route明细”表计算，分母=该表全部条目。")
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
     timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
-    st.dataframe(timeliness_quality_df, use_container_width=True, hide_index=True)
+    st.dataframe(style_breakdown_rows(timeliness_quality_df), use_container_width=True, hide_index=True)
 
     attempt_detail_export_df = metric_source_df.copy()
 
