@@ -2,6 +2,7 @@ from utils.utils import to_datetime_series, rate
 from datetime import datetime, timezone
 from utils.routes import split_pickup_routes, build_lost_package_analysis
 from typing import Any
+import json
 import pandas as pd
 import io 
 from xlsxwriter.utility import xl_col_to_name
@@ -17,6 +18,80 @@ def _yes_no_series(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
         return pd.Series(["" for _ in range(len(df))], index=df.index, dtype="object")
     return df[col].fillna("").astype(str).str.strip().str.lower()
+
+
+def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
+    if isinstance(intervals_raw, list):
+        return [item for item in intervals_raw if isinstance(item, dict)]
+    if isinstance(intervals_raw, str):
+        text = intervals_raw.strip()
+        if not text:
+            return []
+        try:
+            loaded = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(loaded, list):
+            return [item for item in loaded if isinstance(item, dict)]
+    return []
+
+
+def _build_delivery_attempts_df(source_df: pd.DataFrame) -> pd.DataFrame:
+    if source_df.empty:
+        return pd.DataFrame()
+
+    success_types = {"success", "delivered"}
+    fail_types = {"fail", "failed", "failure"}
+    ofd_types = {"out-for-delivery", "ofd", "outfordelivery"}
+
+    attempts: list[dict[str, Any]] = []
+    for _, row in source_df.iterrows():
+        intervals = _load_intervals(row.get("Intervals"))
+        if not intervals:
+            continue
+
+        idx = 0
+        while idx < len(intervals):
+            event = intervals[idx]
+            event_type_value = str(event.get("type") or "").strip().lower()
+            if event_type_value not in ofd_types:
+                idx += 1
+                continue
+
+            current_ofd_event = event
+            search_idx = idx + 1
+            matched_terminal = None
+            while search_idx < len(intervals):
+                candidate_event = intervals[search_idx]
+                candidate_type = str(candidate_event.get("type") or "").strip().lower()
+                if candidate_type in ofd_types:
+                    current_ofd_event = candidate_event
+                    search_idx += 1
+                    continue
+                if candidate_type in (success_types | fail_types):
+                    matched_terminal = candidate_event
+                    break
+                search_idx += 1
+
+            attempt_row = row.to_dict()
+            attempt_row["out_for_delivery_time"] = current_ofd_event.get("time")
+            attempt_row["terminal_time"] = matched_terminal.get("time") if matched_terminal else None
+            if matched_terminal is None:
+                attempt_row["attempt_result"] = "lost"
+                idx = len(intervals)
+            else:
+                matched_type = str(matched_terminal.get("type") or "").strip().lower()
+                if matched_type in success_types:
+                    attempt_row["attempt_result"] = "success"
+                elif matched_type in fail_types:
+                    attempt_row["attempt_result"] = "fail"
+                else:
+                    attempt_row["attempt_result"] = "lost"
+                idx = search_idx + 1
+
+            attempts.append(attempt_row)
+
+    return pd.DataFrame(attempts)
 
 def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
     if detail_df is None or detail_df.empty:
@@ -247,19 +322,23 @@ def build_kpi_report_payload(
     metrics: list[dict[str, Any]] = []
     chart_rows: list[dict[str, Any]] = []
 
-    non_pickup_df["ofd_to_delivered_hours"] = (non_pickup_df["delivered_dt"] - non_pickup_df["ofd_dt"]).dt.total_seconds() / 3600
-    ofd_present_mask = non_pickup_df["ofd_dt"].notna()
-    ofd_base = non_pickup_df[ofd_present_mask].copy()
+    attempt_level_df = _build_delivery_attempts_df(non_pickup_df)
+    if not attempt_level_df.empty:
+        attempt_level_df["ofd_dt"] = pd.to_datetime(attempt_level_df["out_for_delivery_time"], unit="ms", errors="coerce", utc=True).dt.tz_convert(None)
+        attempt_level_df["terminal_dt"] = pd.to_datetime(attempt_level_df["terminal_time"], unit="ms", errors="coerce", utc=True).dt.tz_convert(None)
+        attempt_level_df["ofd_to_terminal_hours"] = (
+            attempt_level_df["terminal_dt"] - attempt_level_df["ofd_dt"]
+        ).dt.total_seconds() / 3600
 
-    delivered_within_24h = ofd_base[
-        ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < 24)
-    ]
+    ofd_base = attempt_level_df[attempt_level_df["ofd_dt"].notna()].copy() if not attempt_level_df.empty else pd.DataFrame()
 
-    
     for threshold in [24, 48, 72]:
         within = ofd_base[
-            ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
-        ]
+            (ofd_base["attempt_result"] == "success")
+            & ofd_base["terminal_dt"].notna()
+            & (ofd_base["ofd_to_terminal_hours"] >= 0)
+            & (ofd_base["ofd_to_terminal_hours"] < threshold)
+        ] if not ofd_base.empty else pd.DataFrame()
         metric_name = f"<{threshold}h delivery rate"
         hit_count = len(within)
         total_count = len(ofd_base)
@@ -305,28 +384,32 @@ def build_kpi_report_payload(
             ]
         )
 
-    attempt_base = non_pickup_df[ofd_present_mask].copy()
-    attempt_base["ofd_to_attempted_hours"] = (attempt_base["attempted_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
-    attempt_base["ofd_to_delivered_hours"] = (attempt_base["delivered_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
-    failed_without_delivery_mask = attempt_base["attempted_dt"].notna() & attempt_base["delivered_dt"].isna()
-    failed_attempt_within_24h_mask = failed_without_delivery_mask & (attempt_base["ofd_to_attempted_hours"] >= 0) & (attempt_base["ofd_to_attempted_hours"] < 24)
-    delivered_within_24h_mask = (
-        (attempt_base["delivered_dt"].notna())
-        & (attempt_base["ofd_to_delivered_hours"] >= 0)
-        & (attempt_base["ofd_to_delivered_hours"] < 24)
+    package_review_base = non_pickup_df[non_pickup_df["ofd_dt"].notna()].copy()
+    package_review_base["ofd_to_attempted_hours"] = (package_review_base["attempted_dt"] - package_review_base["ofd_dt"]).dt.total_seconds() / 3600
+    package_review_base["ofd_to_delivered_hours"] = (package_review_base["delivered_dt"] - package_review_base["ofd_dt"]).dt.total_seconds() / 3600
+    package_failed_without_delivery_mask = package_review_base["attempted_dt"].notna() & package_review_base["delivered_dt"].isna()
+    package_failed_attempt_within_24h_mask = (
+        package_failed_without_delivery_mask
+        & (package_review_base["ofd_to_attempted_hours"] >= 0)
+        & (package_review_base["ofd_to_attempted_hours"] < 24)
+    )
+    package_delivered_within_24h_mask = (
+        package_review_base["delivered_dt"].notna()
+        & (package_review_base["ofd_to_delivered_hours"] >= 0)
+        & (package_review_base["ofd_to_delivered_hours"] < 24)
     )
 
-    review_base = attempt_base.copy()
+    review_base = package_review_base.copy()
     review_base["review_date"] = review_base["ofd_dt"].dt.date.astype(str).replace("NaT", "")
     review_base["driver_name"] = review_base.get("Driver", "")
     review_base["dsp"] = review_base.get("Contractor", "")
     review_base["route_code"] = review_base.get("Route_name", "")
     review_base["delivery_status"] = review_base["delivered_dt"].notna().map(lambda x: "Delivered" if x else "Not Delivered")
     review_base["stop_status"] = "No Attempt"
-    review_base.loc[failed_without_delivery_mask, "stop_status"] = "Failed"
+    review_base.loc[package_failed_without_delivery_mask, "stop_status"] = "Failed"
     review_base.loc[review_base["delivered_dt"].notna(), "stop_status"] = "Delivered"
     review_base["event_code"] = "NO_ATTEMPT"
-    review_base.loc[failed_without_delivery_mask, "event_code"] = "FAILED_STOP"
+    review_base.loc[package_failed_without_delivery_mask, "event_code"] = "FAILED_STOP"
     review_base.loc[review_base["delivered_dt"].notna(), "event_code"] = "DELIVERED_STOP"
     review_base["event_readable"] = review_base["event_code"].map(
         {
@@ -342,8 +425,8 @@ def build_kpi_report_payload(
     review_base["manual_pod_review_status"] = "Pending"
     review_base["manual_review_note"] = ""
     review_base["attempt_validated"] = False
-    review_base.loc[delivered_within_24h_mask, "attempt_validated"] = True
-    review_base.loc[failed_attempt_within_24h_mask, "attempt_validated"] = True
+    review_base.loc[package_delivered_within_24h_mask, "attempt_validated"] = True
+    review_base.loc[package_failed_attempt_within_24h_mask, "attempt_validated"] = True
 
     pod_review_export_columns = [
         "tracking_id",
@@ -430,14 +513,15 @@ def build_kpi_report_payload(
         ]
     )
 
-    failed_without_delivery_count = int(failed_without_delivery_mask.sum())
-    attempt_excluded_by_manual_review = int((failed_attempt_within_24h_mask & ~review_base["attempt_validated"]).sum())
-    first_yes = _yes_no_series(review_base, "first_pod_complience") == "yes"
-    second_yes = _yes_no_series(review_base, "second_pod_complience") == "yes"
-    third_yes = _yes_no_series(review_base, "third_pod_complience") == "yes"
-    attempt_hit_mask = first_yes | second_yes | third_yes
-    attempt_total_count = len(attempt_base)
-    attempt_hit_count = int(attempt_hit_mask.sum())
+    failed_without_delivery_count = int((ofd_base["attempt_result"] == "fail").sum()) if not ofd_base.empty else 0
+    attempt_hit_mask = (
+        ofd_base["terminal_dt"].notna()
+        & (ofd_base["ofd_to_terminal_hours"] >= 0)
+        & (ofd_base["ofd_to_terminal_hours"] < 24)
+        & ofd_base["attempt_result"].isin(["success", "fail"])
+    ) if not ofd_base.empty else pd.Series(dtype=bool)
+    attempt_total_count = len(ofd_base)
+    attempt_hit_count = int(attempt_hit_mask.sum()) if not ofd_base.empty else 0
     attempt_miss_count = max(attempt_total_count - attempt_hit_count, 0)
     metrics.append(
         {
@@ -476,13 +560,12 @@ def build_kpi_report_payload(
             {
                 "category": "pod_review",
                 "metric": "attempt_excluded_by_manual_review",
-                "hit": attempt_excluded_by_manual_review,
+                "hit": 0,
                 "total": attempt_total_count,
-                "rate": rate(attempt_excluded_by_manual_review, attempt_total_count),
+                "rate": rate(0, attempt_total_count),
             },
         ]
     )
-
     
     lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
     scanned_base = lost_analysis["scanned_base"]
