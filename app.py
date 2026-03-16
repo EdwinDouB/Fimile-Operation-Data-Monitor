@@ -1142,13 +1142,6 @@ def main() -> None:
 
         st.subheader(tr("result_preview"))
         preview_df = build_export_df(filtered_df)
-        if "router_messages" in preview_df.columns and "third_party_transit_cache_router_messages" not in preview_df.columns:
-            insert_at = preview_df.columns.get_loc("router_messages") + 1
-            preview_df.insert(
-                insert_at,
-                "third_party_transit_cache_router_messages",
-                preview_df["router_messages"],
-            )
         st.dataframe(preview_df.head(50), use_container_width=True)
 
         st.subheader(tr("customer_summary_section"))
