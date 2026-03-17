@@ -169,30 +169,32 @@ def _parse_attempt_event_time(series: pd.Series) -> pd.Series:
 
     return parsed
 
-def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
+def _build_detailed_overview_table(detail_df: pd.DataFrame, source_df: pd.DataFrame | None = None) -> pd.DataFrame:
     if detail_df is None or detail_df.empty:
         return pd.DataFrame(columns=[
             "Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate",
             "<12h Scan Rate", "<24h Scan Rate", "<48h Scan Rate", "<72h Scan Rate", "POD Qualified Rate", "24h Attempt Rate", "DSP Lost Rate", "Warehouse Lost Rate", "Intercept Success Rate", "Monthly Lost Rate",
         ])
 
-    source_df = detail_df.copy()
-    ofd_col = _resolve_ofd_column(source_df)
-    source_df["ofd_dt"] = to_datetime_series(source_df, ofd_col)
-    if "delivered_time" in source_df.columns:
-        source_df["delivered_dt"] = to_datetime_series(source_df, "delivered_time")
-    else:
-        source_df["delivered_dt"] = pd.NaT
+    source_attempt_df = detail_df.copy()
+    source_tracking_df = source_df.copy() if source_df is not None and not source_df.empty else source_attempt_df.copy()
 
-    source_df["ofd_to_delivered_hours"] = (source_df["delivered_dt"] - source_df["ofd_dt"]).dt.total_seconds() / 3600
+    ofd_col = _resolve_ofd_column(source_attempt_df)
+    source_attempt_df["ofd_dt"] = to_datetime_series(source_attempt_df, ofd_col)
+    if "delivered_time" in source_attempt_df.columns:
+        source_attempt_df["delivered_dt"] = to_datetime_series(source_attempt_df, "delivered_time")
+    else:
+        source_attempt_df["delivered_dt"] = pd.NaT
+
+    source_attempt_df["ofd_to_delivered_hours"] = (source_attempt_df["delivered_dt"] - source_attempt_df["ofd_dt"]).dt.total_seconds() / 3600
     for threshold in [24, 48, 72]:
-        source_df[f"within_{threshold}h"] = (
-            source_df["delivered_dt"].notna()
-            & (source_df["ofd_to_delivered_hours"] >= 0)
-            & (source_df["ofd_to_delivered_hours"] < threshold)
+        source_attempt_df[f"within_{threshold}h"] = (
+            source_attempt_df["delivered_dt"].notna()
+            & (source_attempt_df["ofd_to_delivered_hours"] >= 0)
+            & (source_attempt_df["ofd_to_delivered_hours"] < threshold)
         )
 
-    def _append_row(rows: list[dict[str, Any]], dimension: str, sub_df: pd.DataFrame) -> None:
+    def _append_row(rows: list[dict[str, Any]], dimension: str, sub_df: pd.DataFrame, sub_source_df: pd.DataFrame) -> None:
         total_count = len(sub_df)
         row = {"Dimension": dimension, "Sample Count": total_count}
         for threshold in [24, 48, 72]:
@@ -200,7 +202,7 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
             row[f"<{threshold}h Hit"] = hit
             row[f"<{threshold}h Delivery Rate"] = rate(hit, total_count)
 
-        sub_payload = build_kpi_report_payload(sub_df)
+        sub_payload = build_kpi_report_payload(sub_source_df)
         metric_map = {
             str(item.get("metric")): item
             for item in sub_payload.get("metrics", [])
@@ -215,35 +217,51 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
         row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
         row["POD Qualified Rate"] = _metric_rate(metric_map, "POD qualified rate") or pod_rate_from_data or _metric_rate(metric_map, "Manual POD qualified rate")
-        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
-        row["DSP Lost Rate"] = _metric_rate(metric_map, "DSP lost rate")
-        row["Warehouse Lost Rate"] = _metric_rate(metric_map, "Warehouse lost rate")
+        attempt_elapsed_hours = (
+            to_datetime_series(sub_df, "finish_time") - to_datetime_series(sub_df, "out_for_delivery_time")
+        ).dt.total_seconds() / 3600 if not sub_df.empty else pd.Series(dtype=float)
+        attempt_hit = int(((sub_df.get("result", pd.Series(dtype=str)).fillna("").astype(str).str.lower().isin(["success", "fail"]))
+                           & attempt_elapsed_hours.notna() & (attempt_elapsed_hours >= 0) & (attempt_elapsed_hours < 24)).sum()) if total_count > 0 else 0
+        row["24h Attempt Rate"] = rate(attempt_hit, total_count)
+        row["DSP Lost Rate"] = 1 - _metric_rate(metric_map, "DSP lost rate")
+        row["Warehouse Lost Rate"] = 1 - _metric_rate(metric_map, "Warehouse lost rate")
         row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
-        row["Monthly Lost Rate"] = _metric_rate(metric_map, "lost rate")
+        row["Monthly Lost Rate"] = 1 - _metric_rate(metric_map, "lost rate")
         rows.append(row)
 
     rows: list[dict[str, Any]] = []
-    _append_row(rows, "Overall", source_df)
+    _append_row(rows, "Overall", source_attempt_df, source_tracking_df)
 
-    if "Region" in source_df.columns:
-        for region in sorted(source_df["Region"].fillna("Unknown Region").astype(str).str.strip().replace("", "Unknown Region").unique()):
-            region_df = source_df[source_df["Region"].fillna("Unknown Region").astype(str).str.strip().replace("", "Unknown Region") == region]
-            _append_row(rows, region, region_df)
+    if "Region" in source_attempt_df.columns:
+        attempt_region_series = source_attempt_df["Region"].fillna("Unknown Region").astype(str).str.strip().replace("", "Unknown Region")
+        tracking_region_series = source_tracking_df["Region"].fillna("Unknown Region").astype(str).str.strip().replace("", "Unknown Region") if "Region" in source_tracking_df.columns else pd.Series(["Unknown Region"] * len(source_tracking_df), index=source_tracking_df.index)
+        for region in sorted(attempt_region_series.unique()):
+            region_df = source_attempt_df[attempt_region_series == region]
+            region_source_df = source_tracking_df[tracking_region_series == region]
+            _append_row(rows, region, region_df, region_source_df)
 
-            if "Hub" in source_df.columns:
+            if "Hub" in source_attempt_df.columns:
                 hub_series = region_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
                 for hub in sorted(hub_series.unique()):
                     hub_df = region_df[hub_series == hub]
-                    _append_row(rows, f"  {hub}", hub_df)
+                    if "Hub" in region_source_df.columns:
+                        source_hub_series = region_source_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+                        hub_source_df = region_source_df[source_hub_series == hub]
+                    else:
+                        hub_source_df = region_source_df
+                    _append_row(rows, f"  {hub}", hub_df, hub_source_df)
 
     return pd.DataFrame(rows)
 
 
-def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
+def _build_hub_table(detail_df: pd.DataFrame, hub_name: str, source_df: pd.DataFrame | None = None) -> pd.DataFrame:
     if detail_df.empty:
         return pd.DataFrame()
 
     hub_df = detail_df[detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub") == hub_name].copy()
+    hub_source_df = source_df.copy() if source_df is not None and not source_df.empty else detail_df.copy()
+    if "Hub" in hub_source_df.columns:
+        hub_source_df = hub_source_df[hub_source_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub") == hub_name].copy()
     if hub_df.empty:
         return pd.DataFrame()
 
@@ -267,7 +285,14 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
             row[f"<{threshold}h Hit"] = hit
             row[f"<{threshold}h Delivery Rate"] = rate(hit, total_count)
 
-        sub_payload = build_kpi_report_payload(sub_df)
+        contractor_source_df = hub_source_df
+        if dimension.startswith("  ") and "Contractor" in hub_source_df.columns:
+            contractor = dimension.strip()
+            contractor_source_df = hub_source_df[
+                hub_source_df["Contractor"].fillna("Unknown Contractor").astype(str).str.strip().replace("", "Unknown Contractor") == contractor
+            ]
+
+        sub_payload = build_kpi_report_payload(contractor_source_df)
         metric_map = {
             str(item.get("metric")): item
             for item in sub_payload.get("metrics", [])
@@ -282,11 +307,16 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
         row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
         row["POD Qualified Rate"] = _metric_rate(metric_map, "POD qualified rate") or pod_rate_from_data or _metric_rate(metric_map, "Manual POD qualified rate")
-        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
-        row["DSP Lost Rate"] = _metric_rate(metric_map, "DSP lost rate")
-        row["Warehouse Lost Rate"] = _metric_rate(metric_map, "Warehouse lost rate")
+        attempt_elapsed_hours = (
+            to_datetime_series(sub_df, "finish_time") - to_datetime_series(sub_df, "out_for_delivery_time")
+        ).dt.total_seconds() / 3600 if not sub_df.empty else pd.Series(dtype=float)
+        attempt_hit = int(((sub_df.get("result", pd.Series(dtype=str)).fillna("").astype(str).str.lower().isin(["success", "fail"]))
+                           & attempt_elapsed_hours.notna() & (attempt_elapsed_hours >= 0) & (attempt_elapsed_hours < 24)).sum()) if total_count > 0 else 0
+        row["24h Attempt Rate"] = rate(attempt_hit, total_count)
+        row["DSP Lost Rate"] = 1 - _metric_rate(metric_map, "DSP lost rate")
+        row["Warehouse Lost Rate"] = 1 - _metric_rate(metric_map, "Warehouse lost rate")
         row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
-        row["Monthly Lost Rate"] = _metric_rate(metric_map, "lost rate")
+        row["Monthly Lost Rate"] = 1 - _metric_rate(metric_map, "lost rate")
         rows.append(row)
 
     _append_row(hub_name, hub_df)
@@ -786,8 +816,15 @@ def build_kpi_report_payload(
         ]
     )
 
-    combined_lost_hit = dsp_lost_hit + warehouse_lost_hit
-    combined_lost_total = dsp_lost_total + warehouse_lost_total
+    total_package_count = len(df)
+    dsp_lost_ids = set(
+        attempt_base.loc[attempt_base["attempt_result"] == "lost", "tracking_id"].astype(str)
+    ) if (not attempt_base.empty and "tracking_id" in attempt_base.columns) else set()
+    warehouse_lost_ids = set(
+        scanned_base.loc[scanned_base["lost"] == 1, "tracking_id"].astype(str)
+    ) if (not scanned_base.empty and "tracking_id" in scanned_base.columns) else set()
+    combined_lost_hit = len(dsp_lost_ids.union(warehouse_lost_ids))
+    combined_lost_total = total_package_count
 
     metrics.append(
         {
@@ -843,7 +880,7 @@ def kpi_report_to_excel_bytes(
         detailed_layout_ready = layout_mode == "detailed" and detail_df is not None and not detail_df.empty
         if detailed_layout_ready:
             overview_ws = workbook.add_worksheet("overview")
-            overview_table = _build_detailed_overview_table(detail_df)
+            overview_table = _build_detailed_overview_table(detail_df, source_df=source_df)
             _style_overview_worksheet(overview_ws, overview_table, 0, workbook)
             _insert_dashboard_charts(
                 overview_ws,
@@ -859,7 +896,7 @@ def kpi_report_to_excel_bytes(
             hub_source = source_df if source_df is not None and not source_df.empty else detail_df
             hub_source_series = hub_source["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
             for hub_name in sorted(hub_series.unique()):
-                hub_table = _build_hub_table(detail_df, hub_name)
+                hub_table = _build_hub_table(detail_df, hub_name, source_df=hub_source)
                 if hub_table.empty:
                     continue
                 hub_df = hub_source[hub_source_series == hub_name].copy()
