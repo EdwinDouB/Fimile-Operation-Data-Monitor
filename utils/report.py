@@ -630,6 +630,36 @@ def _write_weight_distribution_section(
     return last_data_row + 3
 
 
+def _ensure_manual_review_weight_columns(pod_review_df: pd.DataFrame, source_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    if pod_review_df is None or pod_review_df.empty:
+        return pod_review_df
+
+    normalized_df = pod_review_df.copy()
+    if source_df is not None and not source_df.empty and "tracking_id" in normalized_df.columns and "tracking_id" in source_df.columns:
+        source_weight_df = source_df[["tracking_id"]].copy()
+        source_weight_df["_resolved_weight"] = _resolve_weight_series(source_df)
+        source_weight_df = source_weight_df.dropna(subset=["_resolved_weight"]).drop_duplicates(subset=["tracking_id"], keep="first")
+        if not source_weight_df.empty:
+            normalized_df = normalized_df.merge(source_weight_df, on="tracking_id", how="left")
+            if "package_weight" not in normalized_df.columns:
+                normalized_df["package_weight"] = normalized_df["_resolved_weight"]
+            else:
+                normalized_df["package_weight"] = pd.to_numeric(normalized_df["package_weight"], errors="coerce").fillna(normalized_df["_resolved_weight"])
+            normalized_df = normalized_df.drop(columns=["_resolved_weight"], errors="ignore")
+
+    if "package_weight" not in normalized_df.columns:
+        normalized_df["package_weight"] = _resolve_weight_series(normalized_df)
+    else:
+        normalized_df["package_weight"] = pd.to_numeric(normalized_df["package_weight"], errors="coerce")
+
+    if "Weight" not in normalized_df.columns:
+        normalized_df["Weight"] = normalized_df["package_weight"]
+    else:
+        normalized_df["Weight"] = pd.to_numeric(normalized_df["Weight"], errors="coerce").fillna(normalized_df["package_weight"])
+
+    return normalized_df
+
+
 
 def build_kpi_report_payload(
     result_df: pd.DataFrame,
@@ -1184,6 +1214,7 @@ def kpi_report_to_excel_bytes(
         if (not isinstance(pod_review_df, pd.DataFrame) or pod_review_df.empty) and source_df is not None and not source_df.empty:
             pod_review_df = build_kpi_report_payload(source_df).get("pod_review_df")
         if isinstance(pod_review_df, pd.DataFrame):
+            pod_review_df = _ensure_manual_review_weight_columns(pod_review_df, source_df=source_df)
             pod_review_df.to_excel(writer, index=False, sheet_name="manual_review_data")
 
         if source_df is not None and not source_df.empty:
