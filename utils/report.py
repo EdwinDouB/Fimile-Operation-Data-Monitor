@@ -659,6 +659,29 @@ def _write_weight_distribution_section(
     return last_data_row + 3
 
 
+def _insert_deferred_charts_grid(
+    worksheet,
+    deferred_charts: list[dict[str, Any]],
+    start_row: int,
+    start_col: int,
+    charts_per_row: int = 3,
+    row_step: int = 16,
+    col_step: int = 8,
+) -> None:
+    if not deferred_charts:
+        return
+
+    for idx, chart_info in enumerate(deferred_charts):
+        row_offset = (idx // charts_per_row) * row_step
+        col_offset = (idx % charts_per_row) * col_step
+        worksheet.insert_chart(
+            start_row + row_offset,
+            start_col + col_offset,
+            chart_info["chart"],
+            chart_info["options"],
+        )
+
+
 def _ensure_manual_review_weight_columns(pod_review_df: pd.DataFrame, source_df: pd.DataFrame | None = None) -> pd.DataFrame:
     if pod_review_df is None or pod_review_df.empty:
         return pod_review_df
@@ -1130,26 +1153,35 @@ def kpi_report_to_excel_bytes(
                     _resolve_weight_distribution(source_df),
                     deferred_charts=overview_weight_charts,
                 )
-                next_row = _write_weight_distribution_section(
-                    overview_ws,
-                    workbook,
-                    next_row,
-                    "仓库重量段",
-                    _resolve_weight_distribution(source_df, "Hub"),
-                    deferred_charts=overview_weight_charts,
-                )
-                for chart_idx, chart_info in enumerate(overview_weight_charts):
-                    overview_ws.insert_chart(next_row, chart_idx * 8, chart_info["chart"], chart_info["options"])
-                if overview_weight_charts:
-                    next_row += 18
+                warehouse_weight_df = _resolve_weight_distribution(source_df, "Hub")
+                if not warehouse_weight_df.empty:
+                    for _, warehouse_row in warehouse_weight_df.iterrows():
+                        warehouse_name = str(warehouse_row.get("维度", "Unknown Hub"))
+                        single_warehouse_df = pd.DataFrame([warehouse_row])
+                        next_row = _write_weight_distribution_section(
+                            overview_ws,
+                            workbook,
+                            next_row,
+                            f"仓库重量段 - ({warehouse_name})",
+                            single_warehouse_df,
+                            deferred_charts=overview_weight_charts,
+                        )
+            overview_chart_col = max(len(overview_table.columns) + 2, 10)
             _insert_dashboard_charts(
                 overview_ws,
                 workbook,
                 chart_df,
                 metrics_df,
                 chart_row=0,
-                chart_col=max(len(overview_table.columns) + 2, 10),
+                chart_col=overview_chart_col,
                 data_col=max(len(overview_table.columns) + 28, 36),
+            )
+            _insert_deferred_charts_grid(
+                overview_ws,
+                overview_weight_charts,
+                start_row=48,
+                start_col=overview_chart_col,
+                charts_per_row=3,
             )
 
             hub_series = detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
@@ -1198,18 +1230,23 @@ def kpi_report_to_excel_bytes(
                             single_contractor_df,
                             deferred_charts=hub_weight_charts,
                         )
-                for chart_idx, chart_info in enumerate(hub_weight_charts):
-                    hub_ws.insert_chart(hub_next_row, chart_idx * 8, chart_info["chart"], chart_info["options"])
-                if hub_weight_charts:
-                    hub_next_row += 18
+
+                hub_chart_col = max(len(hub_table.columns) + 2, 10)
                 _insert_dashboard_charts(
                     hub_ws,
                     workbook,
                     hub_chart_df,
                     hub_metrics_df,
                     chart_row=0,
-                    chart_col=max(len(hub_table.columns) + 2, 10),
+                    chart_col=hub_chart_col,
                     data_col=max(len(hub_table.columns) + 28, 36),
+                )
+                _insert_deferred_charts_grid(
+                    hub_ws,
+                    hub_weight_charts,
+                    start_row=48,
+                    start_col=hub_chart_col,
+                    charts_per_row=3,
                 )
         if not detailed_layout_ready:
             metrics_df.to_excel(writer, index=False, sheet_name="kpi_summary")
