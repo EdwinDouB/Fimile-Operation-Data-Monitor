@@ -577,7 +577,9 @@ def _write_weight_distribution_section(
     start_row: int,
     title: str,
     table_df: pd.DataFrame,
-    chart_anchor_col: int,
+    chart_anchor_col: int | None = None,
+    chart_anchor_row: int | None = None,
+    deferred_charts: list[dict[str, Any]] | None = None,
 ) -> int:
     if table_df.empty:
         return start_row
@@ -648,7 +650,11 @@ def _write_weight_distribution_section(
             )
     chart.set_title({"name": title})
     chart.set_legend({"position": "bottom"})
-    worksheet.insert_chart(start_row, chart_anchor_col, chart, {"x_scale": 1.2, "y_scale": 1.1})
+    chart_options = {"x_scale": 1.2, "y_scale": 1.1}
+    if deferred_charts is not None:
+        deferred_charts.append({"chart": chart, "options": chart_options})
+    elif chart_anchor_col is not None:
+        worksheet.insert_chart(chart_anchor_row if chart_anchor_row is not None else start_row, chart_anchor_col, chart, chart_options)
 
     return last_data_row + 3
 
@@ -1115,13 +1121,14 @@ def kpi_report_to_excel_bytes(
             _style_overview_worksheet(overview_ws, overview_table, 0, workbook)
             next_row = len(overview_table) + 3
             if source_df is not None and not source_df.empty:
+                overview_weight_charts: list[dict[str, Any]] = []
                 next_row = _write_weight_distribution_section(
                     overview_ws,
                     workbook,
                     next_row,
                     "总体重量段",
                     _resolve_weight_distribution(source_df),
-                    chart_anchor_col=max(len(overview_table.columns) + 2, 16),
+                    deferred_charts=overview_weight_charts,
                 )
                 next_row = _write_weight_distribution_section(
                     overview_ws,
@@ -1129,8 +1136,12 @@ def kpi_report_to_excel_bytes(
                     next_row,
                     "仓库重量段",
                     _resolve_weight_distribution(source_df, "Hub"),
-                    chart_anchor_col=max(len(overview_table.columns) + 2, 16),
+                    deferred_charts=overview_weight_charts,
                 )
+                for chart_idx, chart_info in enumerate(overview_weight_charts):
+                    overview_ws.insert_chart(next_row, chart_idx * 8, chart_info["chart"], chart_info["options"])
+                if overview_weight_charts:
+                    next_row += 18
             _insert_dashboard_charts(
                 overview_ws,
                 workbook,
@@ -1165,13 +1176,14 @@ def kpi_report_to_excel_bytes(
                 hub_ws = workbook.add_worksheet(sheet_name)
                 _style_overview_worksheet(hub_ws, hub_table, 0, workbook)
                 hub_next_row = len(hub_table) + 3
+                hub_weight_charts: list[dict[str, Any]] = []
                 hub_next_row = _write_weight_distribution_section(
                     hub_ws,
                     workbook,
                     hub_next_row,
-                    "仓库总重量段（这个表的表头为维度的重量段分布）",
+                    "仓库总重量段",
                     _resolve_weight_distribution(hub_df),
-                    chart_anchor_col=max(len(hub_table.columns) + 2, 16),
+                    deferred_charts=hub_weight_charts,
                 )
                 contractor_weight_df = _resolve_weight_distribution(hub_df, "Contractor")
                 if not contractor_weight_df.empty:
@@ -1184,8 +1196,12 @@ def kpi_report_to_excel_bytes(
                             hub_next_row,
                             f"DSP重量段 - ({contractor_name})",
                             single_contractor_df,
-                            chart_anchor_col=max(len(hub_table.columns) + 2, 16),
+                            deferred_charts=hub_weight_charts,
                         )
+                for chart_idx, chart_info in enumerate(hub_weight_charts):
+                    hub_ws.insert_chart(hub_next_row, chart_idx * 8, chart_info["chart"], chart_info["options"])
+                if hub_weight_charts:
+                    hub_next_row += 18
                 _insert_dashboard_charts(
                     hub_ws,
                     workbook,
