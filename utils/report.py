@@ -208,10 +208,7 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame, source_df: pd.DataFr
             for item in sub_payload.get("metrics", [])
             if isinstance(item, dict)
         }
-        pod_rate_from_data = 0.0
-        if "POD是否合格" in sub_df.columns and len(sub_df) > 0:
-            pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
-            pod_rate_from_data = rate(pod_hit, len(sub_df))
+        pod_rate_from_data = _pod_rate_from_detail_rows(sub_df)
         row["<12h Scan Rate"] = _metric_rate(metric_map, "<12h scan rate")
         row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
@@ -293,10 +290,7 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str, source_df: pd.DataF
             for item in sub_payload.get("metrics", [])
             if isinstance(item, dict)
         }
-        pod_rate_from_data = 0.0
-        if "POD是否合格" in sub_df.columns and len(sub_df) > 0:
-            pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
-            pod_rate_from_data = rate(pod_hit, len(sub_df))
+        pod_rate_from_data = _pod_rate_from_detail_rows(sub_df)
         row["<12h Scan Rate"] = _metric_rate(metric_map, "<12h scan rate")
         row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
@@ -377,6 +371,31 @@ def _safe_rate_value(value: Any) -> float:
     except Exception:
         return 0.0
     return 0.0 if pd.isna(result) else result
+
+
+def _pod_rate_from_detail_rows(sub_df: pd.DataFrame) -> float:
+    if sub_df is None or sub_df.empty:
+        return 0.0
+
+    if "POD是否合格" in sub_df.columns:
+        pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
+        return rate(pod_hit, len(sub_df))
+
+    compliance_cols = [
+        col for col in ["first_pod_complience", "second_pod_complience", "third_pod_complience"] if col in sub_df.columns
+    ]
+    if not compliance_cols:
+        return 0.0
+
+    yes_count = 0
+    no_count = 0
+    for col in compliance_cols:
+        normalized = _yes_no_series(sub_df, col)
+        yes_count += int(normalized.eq("yes").sum())
+        no_count += int(normalized.eq("no").sum())
+
+    reviewed_count = yes_count + no_count
+    return rate(yes_count, reviewed_count)
 
 
 def _insert_dashboard_charts(
