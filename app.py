@@ -1054,23 +1054,27 @@ def render_kpi_charts(
         hit_label="Qualified",
         miss_label="Not qualified",
     )
+    dsp_lost_hit = int(dsp_hub_metrics["dsp"]["lost_rate"]["hit"])
+    dsp_lost_total = int(dsp_hub_metrics["dsp"]["lost_rate"]["total"])
     _upsert_kpi_metric_and_chart(
         kpi_payload,
         category="dsp_assessment",
         metric_name="DSP lost rate",
-        hit_count=int(dsp_hub_metrics["dsp"]["lost_rate"]["hit"]),
-        total_count=int(dsp_hub_metrics["dsp"]["lost_rate"]["total"]),
-        hit_label="Lost after OFD",
-        miss_label="Not lost",
+        hit_count=max(dsp_lost_total - dsp_lost_hit, 0),
+        total_count=dsp_lost_total,
+        hit_label="Not lost",
+        miss_label="Lost after OFD",
     )
+    warehouse_lost_hit = int(dsp_hub_metrics["hub"]["warehouse_lost_rate"]["hit"])
+    warehouse_lost_total = int(dsp_hub_metrics["hub"]["warehouse_lost_rate"]["total"])
     _upsert_kpi_metric_and_chart(
         kpi_payload,
         category="hub_assessment",
         metric_name="Warehouse lost rate",
-        hit_count=int(dsp_hub_metrics["hub"]["warehouse_lost_rate"]["hit"]),
-        total_count=int(dsp_hub_metrics["hub"]["warehouse_lost_rate"]["total"]),
-        hit_label="Warehouse/sorting lost",
-        miss_label="Not lost",
+        hit_count=max(warehouse_lost_total - warehouse_lost_hit, 0),
+        total_count=warehouse_lost_total,
+        hit_label="Not lost",
+        miss_label="Warehouse/sorting lost",
     )
     _upsert_kpi_metric_and_chart(
         kpi_payload,
@@ -1086,8 +1090,10 @@ def render_kpi_charts(
     dsp_cols = st.columns(2)
     pod_metric = dsp_hub_metrics["dsp"]["pod_qualified_rate"]
     dsp_lost_metric = dsp_hub_metrics["dsp"]["lost_rate"]
+    dsp_not_lost_hit = max(int(dsp_lost_metric["total"]) - int(dsp_lost_metric["hit"]), 0)
+    dsp_not_lost_rate = rate(dsp_not_lost_hit, int(dsp_lost_metric["total"]))
     dsp_cols[0].metric("POD合格率", f"{pod_metric['rate']:.2%}", f"{pod_metric['hit']}/{pod_metric['total']}")
-    dsp_cols[1].metric("DSP丢件率（OFD后无后续轨迹）", f"{dsp_lost_metric['rate']:.2%}", f"{dsp_lost_metric['hit']}/{dsp_lost_metric['total']}")
+    dsp_cols[1].metric("DSP非丢件率（1-丢件率）", f"{dsp_not_lost_rate:.2%}", f"{dsp_not_lost_hit}/{dsp_lost_metric['total']}")
 
     metric_specs = ["24h妥投率", "48h妥投率", "72h妥投率", "24h尝试率"]
     metric_cols = st.columns(len(metric_specs))
@@ -1128,9 +1134,11 @@ def render_kpi_charts(
     avg_sample = dsp_hub_metrics["hub"]["first_track_to_sort_scan_sample"]
     intercept_metric = dsp_hub_metrics["hub"]["intercept_success_rate"]
     warehouse_lost_metric = dsp_hub_metrics["hub"]["warehouse_lost_rate"]
+    warehouse_not_lost_hit = max(int(warehouse_lost_metric["total"]) - int(warehouse_lost_metric["hit"]), 0)
+    warehouse_not_lost_rate = rate(warehouse_not_lost_hit, int(warehouse_lost_metric["total"]))
     hub_cols[0].metric("首轨迹到首个上网节点平均时长（warehouse或Sort Scanned at）", f"{avg_hours:.2f}h", f"样本 {avg_sample}")
     hub_cols[1].metric("拦截成功率", f"{intercept_metric['rate']:.2%}", f"{intercept_metric['hit']}/{intercept_metric['total']}")
-    hub_cols[2].metric("仓库丢件率（最后warehouse/sorting后无后续轨迹）", f"{warehouse_lost_metric['rate']:.2%}", f"{warehouse_lost_metric['hit']}/{warehouse_lost_metric['total']}")
+    hub_cols[2].metric("仓库非丢件率（1-丢件率）", f"{warehouse_not_lost_rate:.2%}", f"{warehouse_not_lost_hit}/{warehouse_lost_metric['total']}")
 
     st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到最近的warehouse或最近的type=sort且description含Scanned at节点，取耗时更短者并在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
