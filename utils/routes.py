@@ -937,7 +937,8 @@ def extract_hub_name_from_warehouse_description(description: str) -> str:
 
 def infer_hub_from_pre_ofd_warehouse(events: list[dict[str, Any]], ofd_evt: dict[str, Any] | None) -> str:
     ofd_ts = event_ts(ofd_evt) if ofd_evt else None
-    warehouse_events: list[dict[str, Any]] = []
+    latest_event: dict[str, Any] | None = None
+    latest_ts: int | None = None
 
     for evt in events:
         if event_type(evt) != "warehouse":
@@ -951,19 +952,27 @@ def infer_hub_from_pre_ofd_warehouse(events: list[dict[str, Any]], ofd_evt: dict
         if not extract_hub_name_from_warehouse_description(description):
             continue
 
-        warehouse_events.append(evt)
+        evt_ts_for_cmp = event_ts(evt)
+        if latest_event is None:
+            latest_event = evt
+            latest_ts = evt_ts_for_cmp
+            continue
 
-    if not warehouse_events:
+        # Keep the latest event and preserve stable ordering for equal timestamps.
+        if latest_ts is None or (evt_ts_for_cmp is not None and evt_ts_for_cmp >= latest_ts):
+            latest_event = evt
+            latest_ts = evt_ts_for_cmp
+
+    if latest_event is None:
         return ""
 
-    warehouse_events.sort(key=lambda e: ((event_ts(e) if event_ts(e) is not None else -1), events.index(e)))
-    latest_event = warehouse_events[-1]
     return extract_hub_name_from_warehouse_description(event_description(latest_event))
 
 
 def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str, Any] | None) -> str:
     ofd_ts = event_ts(ofd_evt) if ofd_evt else None
-    scan_events: list[dict[str, Any]] = []
+    target_evt: dict[str, Any] | None = None
+    target_ts: int | None = None
 
     for evt in events:
         description = event_description(evt)
@@ -975,13 +984,20 @@ def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str,
         if ofd_ts is not None and evt_ts is not None and evt_ts > ofd_ts:
             continue
 
-        scan_events.append(evt)
+        evt_ts_for_cmp = event_ts(evt)
+        if target_evt is None:
+            target_evt = evt
+            target_ts = evt_ts_for_cmp
+            continue
 
-    if not scan_events:
+        # Keep the latest scan event while preserving stable ordering for equal timestamps.
+        if target_ts is None or (evt_ts_for_cmp is not None and evt_ts_for_cmp >= target_ts):
+            target_evt = evt
+            target_ts = evt_ts_for_cmp
+
+    if target_evt is None:
         return ""
 
-    scan_events.sort(key=lambda e: ((event_ts(e) if event_ts(e) is not None else -1), events.index(e)))
-    target_evt = scan_events[-1]
     return extract_hub_from_scan_description(event_description(target_evt))
 
 

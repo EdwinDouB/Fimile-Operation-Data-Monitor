@@ -67,12 +67,16 @@ def ensure_compatibility_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
     out = df.copy()
 
+    def _first_list_item(value: Any) -> str:
+        items = _parse_list_cell(value)
+        return items[0] if items else ""
+
     if "Contractor" not in out.columns and "Contractors" in out.columns:
-        out["Contractor"] = out["Contractors"].map(lambda v: (_parse_list_cell(v)[0] if _parse_list_cell(v) else ""))
+        out["Contractor"] = out["Contractors"].map(_first_list_item)
     if "Driver" not in out.columns and "Drivers" in out.columns:
-        out["Driver"] = out["Drivers"].map(lambda v: (_parse_list_cell(v)[0] if _parse_list_cell(v) else ""))
+        out["Driver"] = out["Drivers"].map(_first_list_item)
     if "Route_name" not in out.columns and "Route_names" in out.columns:
-        out["Route_name"] = out["Route_names"].map(lambda v: (_parse_list_cell(v)[0] if _parse_list_cell(v) else ""))
+        out["Route_name"] = out["Route_names"].map(_first_list_item)
 
     def _time_from_intervals(intervals_raw: Any, target_types: set[str]) -> str:
         intervals = _load_intervals(intervals_raw)
@@ -1484,14 +1488,7 @@ def process_tracking_ids(
             if payload is None:
                 return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": "router_messages not found in DB"}
 
-            normalized_payload = payload
-            if isinstance(payload, str):
-                text_payload = payload.strip()
-                if text_payload:
-                    try:
-                        normalized_payload = json.loads(text_payload)
-                    except json.JSONDecodeError:
-                        normalized_payload = payload
+            normalized_payload = _normalize_router_payload(payload)
 
             if isinstance(normalized_payload, (dict, list)):
                 row = build_row(tracking_id, normalized_payload)
@@ -1532,6 +1529,23 @@ def process_tracking_ids(
     ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
     return pd.DataFrame(ordered_rows, columns=result_columns), failures
 
+
+
+
+def _normalize_router_payload(payload: Any) -> Any:
+    if not isinstance(payload, str):
+        return payload
+    text_payload = payload.strip()
+    if not text_payload:
+        return payload
+    try:
+        return json.loads(text_payload)
+    except json.JSONDecodeError:
+        return payload
+
+
+def normalize_router_messages_map(router_messages_map: dict[str, Any]) -> dict[str, Any]:
+    return {tracking_id: _normalize_router_payload(payload) for tracking_id, payload in router_messages_map.items()}
 
 def _parse_address_components(full_address: Any) -> dict[str, str]:
     """Parse a full US-style address into address/state/city components."""
@@ -1577,14 +1591,7 @@ def _extract_address_maps_from_router_payload(
     sender_info_map: dict[str, dict[str, str]] = {}
 
     for tracking_id in dedup_ids:
-        payload = router_messages_map.get(tracking_id)
-        if isinstance(payload, str):
-            text_payload = payload.strip()
-            if text_payload:
-                try:
-                    payload = json.loads(text_payload)
-                except json.JSONDecodeError:
-                    payload = None
+        payload = _normalize_router_payload(router_messages_map.get(tracking_id))
 
         if not isinstance(payload, (dict, list)):
             continue
@@ -1771,11 +1778,11 @@ def main() -> None:
         try:
             fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
             if callable(fetch_router_messages):
-                router_messages_map = fetch_router_messages(tuple(dedup_ids))
+                router_messages_map = normalize_router_messages_map(fetch_router_messages(tuple(dedup_ids)))
             else:
                 fallback_fetch_router_messages = globals().get("fetch_router_messages_map")
                 if callable(fallback_fetch_router_messages):
-                    router_messages_map = fallback_fetch_router_messages(tuple(dedup_ids))
+                    router_messages_map = normalize_router_messages_map(fallback_fetch_router_messages(tuple(dedup_ids)))
                 else:
                     raise AttributeError(
                         f"module 'utils.db' has no attribute 'fetch_router_messages_map' (loaded from {getattr(db, '__file__', 'unknown')})"
