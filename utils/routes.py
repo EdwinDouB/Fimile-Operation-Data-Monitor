@@ -1442,6 +1442,30 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
         else:
             df[dt_col] = pd.NaT
 
+    def _load_interval_events(intervals_raw: Any) -> list[dict[str, Any]]:
+        if isinstance(intervals_raw, list):
+            return [item for item in intervals_raw if isinstance(item, dict)]
+        if isinstance(intervals_raw, str):
+            text = intervals_raw.strip()
+            if not text:
+                return []
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return []
+            if isinstance(parsed, list):
+                return [item for item in parsed if isinstance(item, dict)]
+        return []
+
+    def _last_event_is_cancel(intervals_raw: Any) -> bool:
+        events = _load_interval_events(intervals_raw)
+        if not events:
+            return False
+        indexed = list(enumerate(events))
+        indexed.sort(key=lambda item: ((event_ts(item[1]) is None), event_ts(item[1]) or -1, item[0]))
+        last_event = indexed[-1][1]
+        return event_type(last_event) == "cancel"
+
     base_mask = df["last_scanned_dt"].notna()
     scanned_base = df[base_mask].copy()
     if scanned_base.empty:
@@ -1483,7 +1507,11 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
             .isin({"1", "true", "yes", "y"})
         )
 
-    lost_mask_base = candidate_mask_base & (~immature_mask_base) & (~customer_service_mask_base)
+    canceled_last_mask_base = pd.Series(False, index=scanned_base.index)
+    if "Intervals" in scanned_base.columns:
+        canceled_last_mask_base = scanned_base["Intervals"].map(_last_event_is_cancel)
+
+    lost_mask_base = candidate_mask_base & (~immature_mask_base) & (~customer_service_mask_base) & (~canceled_last_mask_base)
 
     candidate_mask = pd.Series(False, index=df.index)
     candidate_mask.loc[scanned_base.index] = candidate_mask_base.to_numpy()
