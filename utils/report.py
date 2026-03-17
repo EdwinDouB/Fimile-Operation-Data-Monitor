@@ -601,26 +601,49 @@ def _write_weight_distribution_section(
     first_data_row = header_row + 1
     last_data_row = header_row + len(table_df)
     last_col = len(table_df.columns) - 1
+
+    row_totals = table_df.iloc[:, 1:].sum(axis=1)
+
+    def _build_pct_labels(values: list[Any], total: float) -> list[dict[str, str]]:
+        if total <= 0:
+            return [{"value": "0.0%"} for _ in values]
+        return [
+            {"value": f"{(float(value) / float(total)) * 100:.1f}%"}
+            for value in values
+        ]
+
     chart_opts = {"type": "column"}
     if len(table_df) > 1:
         chart_opts["subtype"] = "stacked"
     chart = workbook.add_chart(chart_opts)
     if len(table_df) == 1:
+        single_values = table_df.iloc[0, 1:].tolist()
+        single_total = float(row_totals.iloc[0]) if not row_totals.empty else 0.0
         chart.add_series(
             {
                 "name": title,
                 "categories": [worksheet.get_name(), header_row, 1, header_row, last_col],
                 "values": [worksheet.get_name(), first_data_row, 1, first_data_row, last_col],
-                "data_labels": {"value": True},
+                "data_labels": {"custom": _build_pct_labels(single_values, single_total)},
             }
         )
     else:
         for cidx in range(1, len(table_df.columns)):
+            series_values = table_df.iloc[:, cidx].tolist()
+            pct_labels = [
+                {
+                    "value": f"{((float(series_values[idx]) / float(row_totals.iloc[idx])) * 100):.1f}%"
+                    if float(row_totals.iloc[idx]) > 0
+                    else "0.0%"
+                }
+                for idx in range(len(series_values))
+            ]
             chart.add_series(
                 {
                     "name": [worksheet.get_name(), header_row, cidx],
                     "categories": [worksheet.get_name(), first_data_row, 0, last_data_row, 0],
                     "values": [worksheet.get_name(), first_data_row, cidx, last_data_row, cidx],
+                    "data_labels": {"custom": pct_labels},
                 }
             )
     chart.set_title({"name": title})
@@ -1096,7 +1119,7 @@ def kpi_report_to_excel_bytes(
                     overview_ws,
                     workbook,
                     next_row,
-                    "总体重量段（这个表的表头为维度的重量段分布）",
+                    "总体重量段",
                     _resolve_weight_distribution(source_df),
                     chart_anchor_col=max(len(overview_table.columns) + 2, 16),
                 )
@@ -1104,7 +1127,7 @@ def kpi_report_to_excel_bytes(
                     overview_ws,
                     workbook,
                     next_row,
-                    "每个仓库的重量段（这一页表格每一行为维度）",
+                    "仓库重量段",
                     _resolve_weight_distribution(source_df, "Hub"),
                     chart_anchor_col=max(len(overview_table.columns) + 2, 16),
                 )
@@ -1152,7 +1175,6 @@ def kpi_report_to_excel_bytes(
                 )
                 contractor_weight_df = _resolve_weight_distribution(hub_df, "Contractor")
                 if not contractor_weight_df.empty:
-                    contractor_title = "每个Contractor的重量段（每个Contractor单独一张表和图）"
                     for _, contractor_row in contractor_weight_df.iterrows():
                         contractor_name = str(contractor_row.get("维度", "Unknown Contractor"))
                         single_contractor_df = pd.DataFrame([contractor_row])
@@ -1160,7 +1182,7 @@ def kpi_report_to_excel_bytes(
                             hub_ws,
                             workbook,
                             hub_next_row,
-                            f"{contractor_title} - {contractor_name}",
+                            f"DSP重量段 - ({contractor_name})",
                             single_contractor_df,
                             chart_anchor_col=max(len(hub_table.columns) + 2, 16),
                         )
