@@ -1484,16 +1484,6 @@ def process_tracking_ids(
     total = len(dedup_ids)
     completed = 0
 
-    def _serialize_router_messages(payload: Any) -> str:
-        if payload is None:
-            return ""
-        if isinstance(payload, str):
-            return payload
-        try:
-            return json.dumps(payload, ensure_ascii=False)
-        except TypeError:
-            return str(payload)
-
     def worker(tracking_id: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
         try:
             payload = router_messages_map.get(tracking_id)
@@ -1507,11 +1497,9 @@ def process_tracking_ids(
                 return tracking_id, row, None
 
             row = empty_row(tracking_id)
-            row["router_messages"] = _serialize_router_messages(payload)
             return tracking_id, row, {"tracking_id": tracking_id, "reason": "router_messages is not valid JSON object/array"}
         except Exception as e:  # noqa: BLE001
             row = empty_row(tracking_id)
-            row["router_messages"] = _serialize_router_messages(router_messages_map.get(tracking_id))
             return tracking_id, row, {"tracking_id": tracking_id, "reason": str(e)}
 
     max_workers = min(API_MAX_WORKERS, total)
