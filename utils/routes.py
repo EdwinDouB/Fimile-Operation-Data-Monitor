@@ -1047,12 +1047,6 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
 
     structured_identity = extract_route_identity_from_payload(payload)
 
-    raw_router_messages = ""
-    if isinstance(payload, (dict, list)):
-        raw_router_messages = json.dumps(payload, ensure_ascii=False)
-    elif payload is not None:
-        raw_router_messages = str(payload)
-
     route_names: list[str] = []
     contractors: list[str] = []
     drivers: list[str] = []
@@ -1082,7 +1076,6 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
         "Drivers": json.dumps(drivers, ensure_ascii=False),
         "Route_names": json.dumps(route_names, ensure_ascii=False),
         "Weight": _extract_weight_from_payload(payload),
-        "router_messages": raw_router_messages,
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(to_local_dt(intervals[-1].get("time") if intervals else None)),

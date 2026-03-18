@@ -8,7 +8,6 @@ OUTPUT_COLUMNS = [
     "Drivers",
     "Route_names",
     "Weight",
-    "router_messages",
     "sender_company",
     "sender_province",
     "sender_city",
