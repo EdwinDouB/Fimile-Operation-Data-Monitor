@@ -1669,6 +1669,12 @@ def main() -> None:
         st.session_state["report_filter_start_date"] = None
     if "report_filter_end_date" not in st.session_state:
         st.session_state["report_filter_end_date"] = None
+    if "applied_report_filter_start_date" not in st.session_state:
+        st.session_state["applied_report_filter_start_date"] = None
+    if "applied_report_filter_end_date" not in st.session_state:
+        st.session_state["applied_report_filter_end_date"] = None
+    if "metrics_ready" not in st.session_state:
+        st.session_state["metrics_ready"] = False
     if "exclude_atl_wdr" not in st.session_state:
         st.session_state["exclude_atl_wdr"] = True
     if "language" not in st.session_state:
@@ -1711,6 +1717,9 @@ def main() -> None:
     raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
     run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
     if run_btn:
+        st.session_state["metrics_ready"] = False
+        st.session_state["applied_report_filter_start_date"] = None
+        st.session_state["applied_report_filter_end_date"] = None
         clear_query_caches()
         with st.spinner(tr("loading_db")):
             try:
@@ -1727,14 +1736,24 @@ def main() -> None:
         with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
             st.write(raw_ids[:50])
 
-    st.markdown("#### 报表时间筛选（按日期，可选）")
-    timestamp_cols = st.columns(2)
-    with timestamp_cols[0]:
-        st.date_input("起始时间 - 日期", key="report_filter_start_date", value=None)
-    with timestamp_cols[1]:
-        st.date_input("截止时间 - 日期", key="report_filter_end_date", value=None)
+    st.markdown(f"#### {tr('report_filter_title')}")
+    filter_cols = st.columns([1, 1, 0.7])
+    with filter_cols[0]:
+        st.date_input(tr("report_filter_start_label"), key="report_filter_start_date", value=None)
+    with filter_cols[1]:
+        st.date_input(tr("report_filter_end_label"), key="report_filter_end_date", value=None)
+    with filter_cols[2]:
+        st.write("")
+        st.write("")
+        calc_btn = st.button(
+            tr("compute_metrics_btn"),
+            type="secondary",
+            key="compute_metrics_btn",
+            use_container_width=True,
+            disabled=st.session_state.get('result_df') is None,
+        )
 
-    st.toggle("是否去除 WDR 和 ATL（默认开启）", key="exclude_atl_wdr", value=True)
+    st.toggle(tr("exclude_atl_wdr_toggle"), key="exclude_atl_wdr", value=True)
 
     cleaned, dedup_ids, counter = normalize_tracking_ids(raw_ids, uppercase=False)
     duplicate_ids = [k for k, v in counter.items() if v > 1]
@@ -1818,9 +1837,23 @@ def main() -> None:
         st.session_state["failures"] = failures
 
         status.text(tr("done"))
+        st.session_state["metrics_ready"] = False
+        st.session_state["applied_report_filter_start_date"] = None
+        st.session_state["applied_report_filter_end_date"] = None
 
     result_df: pd.DataFrame | None = st.session_state.get("result_df")
     failures: list[dict[str, str]] = st.session_state.get("failures", [])
+
+    if result_df is not None and calc_btn:
+        start_date = st.session_state.get("report_filter_start_date")
+        end_date = st.session_state.get("report_filter_end_date")
+        if start_date is not None and end_date is not None and start_date > end_date:
+            st.error(tr("report_filter_invalid"))
+            st.session_state["metrics_ready"] = False
+        else:
+            st.session_state["applied_report_filter_start_date"] = start_date
+            st.session_state["applied_report_filter_end_date"] = end_date
+            st.session_state["metrics_ready"] = True
 
     if result_df is not None:
         known_hub_states = set(HUB_BY_STATE.keys())
@@ -1876,14 +1909,38 @@ def main() -> None:
 
         result_df = apply_manual_dimension_overrides(result_df)
 
-        filtered_df = result_df
+        metrics_ready = bool(st.session_state.get("metrics_ready", False))
+        applied_filter_start = st.session_state.get("applied_report_filter_start_date")
+        applied_filter_end = st.session_state.get("applied_report_filter_end_date")
 
         report_start_dt = None
         report_end_dt = None
-        if st.session_state.get("report_filter_start_date") is not None:
-            report_start_dt = datetime.combine(st.session_state["report_filter_start_date"], datetime.min.time())
-        if st.session_state.get("report_filter_end_date") is not None:
-            report_end_dt = datetime.combine(st.session_state["report_filter_end_date"], datetime.max.time())
+        if applied_filter_start is not None:
+            report_start_dt = datetime.combine(applied_filter_start, datetime.min.time())
+        if applied_filter_end is not None:
+            report_end_dt = datetime.combine(applied_filter_end, datetime.max.time())
+
+        success_count = len(result_df) - len(failures)
+        fail_count = len(failures)
+
+        s1, s2 = st.columns(2)
+        s1.metric(tr("success_count"), success_count)
+        s2.metric(tr("fail_count"), fail_count)
+
+        if failures:
+            st.error(tr("request_fail"))
+            fail_df = pd.DataFrame(failures)
+            st.dataframe(fail_df, use_container_width=True)
+            st.download_button(
+                tr("download_fail_csv"),
+                data=fail_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+            )
+
+        filtered_df = result_df
+        if not metrics_ready:
+            st.info(tr("compute_metrics_prompt"))
 
         excluded_hub_df = pd.DataFrame()
         excluded_hub_route_attempts_df = pd.DataFrame()
@@ -1891,6 +1948,19 @@ def main() -> None:
             excluded_hub_df = filtered_df[
                 filtered_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
             ].copy()
+
+        if metrics_ready and (applied_filter_start is not None or applied_filter_end is not None):
+            applied_parts = []
+            if applied_filter_start is not None:
+                applied_parts.append(f"{tr('report_filter_start_label')}: {applied_filter_start.strftime('%Y/%m/%d')}")
+            if applied_filter_end is not None:
+                applied_parts.append(f"{tr('report_filter_end_label')}: {applied_filter_end.strftime('%Y/%m/%d')}")
+            st.caption(tr("compute_metrics_applied_caption", filters='；'.join(applied_parts)))
+        elif metrics_ready:
+            st.caption(tr("compute_metrics_applied_caption", filters=tr("report_filter_empty")))
+
+        if not metrics_ready:
+            return
 
         layout_mode = st.radio(
             tr("layout_mode_label"),
@@ -1925,24 +1995,6 @@ def main() -> None:
                     st.dataframe(excluded_hub_df, use_container_width=True)
                     st.markdown("**ATL/WDR Route尝试明细**")
                     st.dataframe(excluded_hub_route_attempts_df, use_container_width=True)
-
-        success_count = len(result_df) - len(failures)
-        fail_count = len(failures)
-
-        s1, s2 = st.columns(2)
-        s1.metric(tr("success_count"), success_count)
-        s2.metric(tr("fail_count"), fail_count)
-
-        if failures:
-            st.error(tr("request_fail"))
-            fail_df = pd.DataFrame(failures)
-            st.dataframe(fail_df, use_container_width=True)
-            st.download_button(
-                tr("download_fail_csv"),
-                data=fail_df.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-            )
 
         st.subheader(tr("result_preview"))
         display_df = build_tracking_display_df(
