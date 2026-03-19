@@ -128,8 +128,8 @@ def _enrich_route_attempts_with_pricing(
         payload = router_messages_map.get(tracking_id)
         normalized_payload = _normalize_router_payload(payload)
         if isinstance(normalized_payload, (dict, list)):
-            weights.append(_extract_weight_from_payload(normalized_payload))
-            volumes.append(_extract_volume_from_payload(normalized_payload))
+            weights.append(route_utils._extract_weight_from_payload(normalized_payload))
+            volumes.append(route_utils._extract_volume_from_payload(normalized_payload))
         else:
             weights.append("")
             volumes.append("")
