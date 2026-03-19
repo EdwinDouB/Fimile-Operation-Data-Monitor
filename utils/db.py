@@ -8,6 +8,9 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
+ROUTER_MESSAGES_CHUNK_SIZE = max(100, int(read_config("ROUTER_MESSAGES_CHUNK_SIZE", "2000")))
+_ROUTER_MESSAGES_TABLE_INFO_CACHE: dict[tuple[str, str], tuple[str, set[str], str, str]] = {}
+
 def _read_with_aliases(*names: str, default: str = "") -> str:
     for name in names:
         value = read_config(name, "")
@@ -139,6 +142,28 @@ def _resolve_router_messages_order_column(columns: set[str]) -> str:
         if candidate in columns:
             return candidate
     return ""
+
+
+def _load_router_messages_table_info(conn: Any) -> tuple[str, set[str], str, str]:
+    config = _load_mysql_config()
+    preferred = _read_with_aliases("ROUTER_MESSAGES_TABLE", "MYSQL_ROUTER_MESSAGES_TABLE")
+    cache_key = (str(config["database"]), preferred)
+    cached = _ROUTER_MESSAGES_TABLE_INFO_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    table_name = _resolve_router_messages_table(conn)
+    if not table_name or not table_name.replace("_", "").isalnum():
+        resolved = ("", set(), "", "")
+        _ROUTER_MESSAGES_TABLE_INFO_CACHE[cache_key] = resolved
+        return resolved
+
+    table_columns = _load_table_columns(conn, table_name)
+    order_column = _resolve_router_messages_order_column(table_columns)
+    tie_breaker_column = "id" if "id" in table_columns else ""
+    resolved = (table_name, table_columns, order_column, tie_breaker_column)
+    _ROUTER_MESSAGES_TABLE_INFO_CACHE[cache_key] = resolved
+    return resolved
 
 DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
 
@@ -378,24 +403,15 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
 
     payload_map: dict[str, Any] = {}
     try:
-        table_name = _resolve_router_messages_table(conn)
-        if not table_name:
-            return {}
-        if not table_name.replace("_", "").isalnum():
-            return {}
-
-        table_columns = _load_table_columns(conn, table_name)
+        table_name, table_columns, order_column, tie_breaker_column = _load_router_messages_table_info(conn)
         if not table_columns:
             return {}
 
         if "tracking_number" not in table_columns or "router_messages" not in table_columns:
             return {}
 
-        order_column = _resolve_router_messages_order_column(table_columns)
-        tie_breaker_column = "id" if "id" in table_columns else ""
-
         with conn.cursor() as cur:
-            chunk_size = 500
+            chunk_size = ROUTER_MESSAGES_CHUNK_SIZE
             for i in range(0, len(tracking_ids_clean), chunk_size):
                 chunk = tracking_ids_clean[i : i + chunk_size]
                 placeholders = ", ".join(["%s"] * len(chunk))
@@ -497,3 +513,4 @@ def clear_query_caches() -> None:
         fetch_router_messages_map,
     ):
         fn.clear()
+    _ROUTER_MESSAGES_TABLE_INFO_CACHE.clear()

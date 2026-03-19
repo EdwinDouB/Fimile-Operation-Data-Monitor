@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 import ast
 import io
@@ -1779,7 +1779,8 @@ def process_tracking_ids(
     dedup_ids: list[str],
     receive_province_map: dict[str, str],
     sender_info_map: dict[str, dict[str, str]],
-    router_messages_map: dict[str, Any],
+    normalized_payload_map: dict[str, Any],
+    events_map: dict[str, list[dict[str, Any]]],
     route_metadata_map: dict[str, dict[str, str]],
     progress_bar,
     status_text,
@@ -1798,18 +1799,19 @@ def process_tracking_ids(
     total = len(dedup_ids)
     completed = 0
 
+    progress_update_every = max(1, min(100, total // 20 or 1))
+
     def worker(tracking_id: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
         try:
-            payload = router_messages_map.get(tracking_id)
+            payload = normalized_payload_map.get(tracking_id)
             if payload is None:
                 return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": "router_messages not found in DB"}
 
-            normalized_payload = _normalize_router_payload(payload)
-
-            if isinstance(normalized_payload, (dict, list)):
-                row = build_row(
+            if isinstance(payload, (dict, list)):
+                row = build_row_from_events(
                     tracking_id,
-                    normalized_payload,
+                    payload,
+                    events_map.get(tracking_id, []),
                     route_metadata_map=route_metadata_map,
                     include_dimensions=include_dimensions,
                 )
@@ -1821,26 +1823,23 @@ def process_tracking_ids(
             row = empty_row(tracking_id)
             return tracking_id, row, {"tracking_id": tracking_id, "reason": str(e)}
 
-    max_workers = min(API_MAX_WORKERS, total)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_tid = {executor.submit(worker, tracking_id): tracking_id for tracking_id in dedup_ids}
+    for tracking_id in dedup_ids:
+        tracking_id, row, failure = worker(tracking_id)
+        state = str(receive_province_map.get(tracking_id) or "").strip()
+        row["State"] = normalize_state(state)
+        row["Region"] = infer_region_from_state(state)
+        sender_info = sender_info_map.get(tracking_id, {})
+        row["sender_company"] = str(sender_info.get("sender_company") or "").strip()
+        row["sender_province"] = str(sender_info.get("sender_province") or "").strip()
+        row["sender_city"] = str(sender_info.get("sender_city") or "").strip()
+        row["sender_address"] = str(sender_info.get("sender_address") or "").strip()
+        rows_by_id[tracking_id] = row
 
-        for future in as_completed(future_to_tid):
-            tracking_id, row, failure = future.result()
-            state = str(receive_province_map.get(tracking_id) or "").strip()
-            row["State"] = normalize_state(state)
-            row["Region"] = infer_region_from_state(state)
-            sender_info = sender_info_map.get(tracking_id, {})
-            row["sender_company"] = str(sender_info.get("sender_company") or "").strip()
-            row["sender_province"] = str(sender_info.get("sender_province") or "").strip()
-            row["sender_city"] = str(sender_info.get("sender_city") or "").strip()
-            row["sender_address"] = str(sender_info.get("sender_address") or "").strip()
-            rows_by_id[tracking_id] = row
+        if failure:
+            failures.append(failure)
 
-            if failure:
-                failures.append(failure)
-
-            completed += 1
+        completed += 1
+        if completed == total or completed % progress_update_every == 0:
             progress_value = progress_start + (progress_end - progress_start) * (completed / total)
             progress_bar.progress(progress_value)
             status_text.text(tr("processing", completed=completed, total=total, tracking_id=tracking_id))
@@ -1894,7 +1893,7 @@ def _parse_address_components(full_address: Any) -> dict[str, str]:
 
 def _extract_address_maps_from_router_payload(
     dedup_ids: list[str],
-    router_messages_map: dict[str, Any],
+    events_map: dict[str, list[dict[str, Any]]],
 ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     """
     Build receiver-state map and sender-info map from router_messages label events.
@@ -1906,12 +1905,7 @@ def _extract_address_maps_from_router_payload(
     sender_info_map: dict[str, dict[str, str]] = {}
 
     for tracking_id in dedup_ids:
-        payload = _normalize_router_payload(router_messages_map.get(tracking_id))
-
-        if not isinstance(payload, (dict, list)):
-            continue
-
-        events = normalize_events(payload)
+        events = events_map.get(tracking_id, [])
         receiver_address = ""
         sender_address = ""
 
@@ -1962,7 +1956,7 @@ def _has_sender_info_value(sender_info: dict[str, str] | None) -> bool:
 
 def _load_address_maps_with_db_fallback(
     dedup_ids: list[str],
-    router_messages_map: dict[str, Any],
+    events_map: dict[str, list[dict[str, Any]]],
 ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
     receive_province_map: dict[str, str] = {}
     sender_info_map: dict[str, dict[str, str]] = {}
@@ -1989,7 +1983,7 @@ def _load_address_maps_with_db_fallback(
     if not missing_tracking_ids:
         return receive_province_map, sender_info_map
 
-    payload_receive_map, payload_sender_map = _extract_address_maps_from_router_payload(missing_tracking_ids, router_messages_map)
+    payload_receive_map, payload_sender_map = _extract_address_maps_from_router_payload(missing_tracking_ids, events_map)
 
     for tracking_id, state in payload_receive_map.items():
         if tracking_id not in receive_province_map or not str(receive_province_map.get(tracking_id) or "").strip():
@@ -2006,6 +2000,19 @@ def _load_address_maps_with_db_fallback(
             sender_info_map[tracking_id] = payload_sender
 
     return receive_province_map, sender_info_map
+
+
+def _prepare_router_payload_maps(router_messages_map: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+    normalized_payload_map: dict[str, Any] = {}
+    events_map: dict[str, list[dict[str, Any]]] = {}
+    for tracking_id, payload in router_messages_map.items():
+        normalized_payload = _normalize_router_payload(payload)
+        normalized_payload_map[str(tracking_id)] = normalized_payload
+        if isinstance(normalized_payload, (dict, list)):
+            events_map[str(tracking_id)] = normalize_events(normalized_payload)
+        else:
+            events_map[str(tracking_id)] = []
+    return normalized_payload_map, events_map
 
 def main() -> None:
     st.set_page_config(page_title="Fimile US Shipment Operations Dashboard", layout="wide")
@@ -2166,6 +2173,8 @@ def main() -> None:
         receive_province_map: dict[str, str] = {}
         sender_info_map: dict[str, dict[str, str]] = {}
         router_messages_map: dict[str, Any] = {}
+        normalized_payload_map: dict[str, Any] = {}
+        events_map: dict[str, list[dict[str, Any]]] = {}
         route_metadata_map: dict[str, dict[str, str]] = {}
         assignee_payload = None
         progress, elapsed_text, status_text, started_at = _init_task_progress_ui("load_merge", tr("task_load_merge"))
@@ -2196,17 +2205,20 @@ def main() -> None:
             router_messages_map = {}
 
         try:
-            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.42, tr("task_step_route_metadata"))
-            route_metadata_map = build_route_metadata_map(router_messages_map, assignee_payload=assignee_payload)
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.38, tr("task_step_route_metadata"))
+            normalized_payload_map, events_map = _prepare_router_payload_maps(router_messages_map)
+            route_metadata_map = build_route_metadata_map_from_events(events_map, assignee_payload=assignee_payload)
         except Exception as e:
             st.warning(f"Failed to build route metadata cache: {e}")
+            normalized_payload_map = {}
+            events_map = {}
             route_metadata_map = {}
 
         try:
             _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.52, tr("task_step_receiver_data"))
             receive_province_map, sender_info_map = _load_address_maps_with_db_fallback(
                 dedup_ids,
-                router_messages_map,
+                events_map,
             )
         except Exception as e:
             st.warning(tr("state_region_fail", error=e))
@@ -2218,7 +2230,8 @@ def main() -> None:
             dedup_ids=dedup_ids,
             receive_province_map=receive_province_map,
             sender_info_map=sender_info_map,
-            router_messages_map=router_messages_map,
+            normalized_payload_map=normalized_payload_map,
+            events_map=events_map,
             route_metadata_map=route_metadata_map,
             progress_bar=progress,
             status_text=_TaskStatusAdapter("load_merge", elapsed_text, status_text, started_at),

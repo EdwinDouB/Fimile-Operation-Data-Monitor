@@ -380,11 +380,20 @@ def build_route_metadata_map(
     router_messages_map: dict[str, Any],
     assignee_payload: Any | None = None,
 ) -> dict[str, dict[str, str]]:
+    events_map: dict[str, list[dict[str, Any]]] = {}
+    for tracking_id, payload in router_messages_map.items():
+        events_map[str(tracking_id)] = normalize_events(payload)
+    return build_route_metadata_map_from_events(events_map, assignee_payload=assignee_payload)
+
+
+def build_route_metadata_map_from_events(
+    events_map: dict[str, list[dict[str, Any]]],
+    assignee_payload: Any | None = None,
+) -> dict[str, dict[str, str]]:
     route_metadata_map: dict[str, dict[str, str]] = {}
     needed_assignee_ids: set[str] = set()
 
-    for payload in router_messages_map.values():
-        events = normalize_events(payload)
+    for events in events_map.values():
         if not events:
             continue
 
@@ -1296,30 +1305,73 @@ def build_row(
     include_dimensions: bool = True,
 ) -> dict[str, str]:
     events = normalize_events(payload)
-    intervals = build_intervals(events, payload=payload, route_metadata_map=route_metadata_map)
-    is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
-
-    first_scanned_interval = next(
-        (
-            item
-            for item in intervals
-            if str(item.get("type") or "").strip().lower() == "warehouse"
-            or (
-                str(item.get("type") or "").strip().lower() == "sort"
-                and "scanned at" in str(item.get("description") or "").strip().lower()
-            )
-        ),
-        None,
+    return build_row_from_events(
+        tracking_id,
+        payload,
+        events,
+        route_metadata_map=route_metadata_map,
+        include_dimensions=include_dimensions,
     )
 
-    ofd_events = events_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
-    fail_events = events_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
-    success_events = events_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
 
-    fail_evt = fail_events[0] if fail_events else None
-    success_evt = success_events[0] if success_events else None
-    route_assignments = extract_all_route_assignments(events)
-    
+def build_row_from_events(
+    tracking_id: str,
+    payload: Any,
+    events: list[dict[str, Any]],
+    route_metadata_map: dict[str, dict[str, str]] | None = None,
+    include_dimensions: bool = True,
+) -> dict[str, str]:
+    intervals = build_intervals(events, payload=payload, route_metadata_map=route_metadata_map)
+    is_delivered = False
+    first_scanned_interval = None
+    if intervals:
+        for interval in intervals:
+            interval_type = str(interval.get("type") or "").strip().lower()
+            if interval_type in {"success", "delivered"}:
+                is_delivered = True
+            if first_scanned_interval is None and (
+                interval_type == "warehouse"
+                or (
+                    interval_type == "sort"
+                    and "scanned at" in str(interval.get("description") or "").strip().lower()
+                )
+            ):
+                first_scanned_interval = interval
+
+    ofd_entries: list[tuple[int, int, dict[str, Any]]] = []
+    fail_entries: list[tuple[int, int, dict[str, Any]]] = []
+    success_entries: list[tuple[int, int, dict[str, Any]]] = []
+    route_assignments: list[str] = []
+    seen_route_assignments: set[str] = set()
+
+    for idx, event in enumerate(events):
+        evt_type = event_type(event)
+        evt_ts = event_ts(event)
+        sort_ts = evt_ts if evt_ts is not None else -1
+
+        route_name = extract_route_name_from_event(event)
+        normalized_route_name = route_name.strip()
+        if normalized_route_name:
+            lowered_route_name = normalized_route_name.lower()
+            if lowered_route_name not in seen_route_assignments:
+                seen_route_assignments.add(lowered_route_name)
+                route_assignments.append(normalized_route_name)
+
+        if evt_type in {"out-for-delivery", "ofd", "outfordelivery"}:
+            ofd_entries.append((sort_ts, idx, event))
+        elif evt_type in {"fail", "failed", "failure"}:
+            fail_entries.append((sort_ts, idx, event))
+        elif evt_type in {"success", "delivered"}:
+            success_entries.append((sort_ts, idx, event))
+
+    ofd_entries.sort(key=lambda item: (item[0], item[1]))
+    fail_entries.sort(key=lambda item: (item[0], item[1]))
+    success_entries.sort(key=lambda item: (item[0], item[1]))
+
+    ofd_events = [item[2] for item in ofd_entries]
+    fail_evt = fail_entries[0][2] if fail_entries else None
+    success_evt = success_entries[0][2] if success_entries else None
+
     created_time_ms = None
     if intervals:
         first_interval_time = intervals[0].get("time")
